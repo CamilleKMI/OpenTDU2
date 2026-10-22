@@ -237,6 +237,7 @@ EdenAvatar::~EdenAvatar() { unload(); }
 
 void EdenAvatar::unload() {
     parts.clear();
+    headParts.clear();
     pSkeleton = nullptr;
 }
 
@@ -274,6 +275,7 @@ bool EdenAvatar::load( EdenAvatarLibrary &library, const char *pConfigId ) {
         std::string File;
         int32_t Color;
         bool bHair;
+        bool bHead; // worn on the head (hair, beard, glasses, helmet)
     };
     std::vector<Worn> worn;
     for ( const char *pSlot : kSlots ) {
@@ -299,7 +301,9 @@ bool EdenAvatar::load( EdenAvatarLibrary &library, const char *pConfigId ) {
             continue;
         }
         worn.push_back( { file, static_cast<int32_t>( pnj[( std::string( "_" ) + pSlot + "_color" ).c_str()].asInt() ),
-                          strcmp( pSlot, "hair" ) == 0 || strcmp( pSlot, "beard" ) == 0 } );
+                          strcmp( pSlot, "hair" ) == 0 || strcmp( pSlot, "beard" ) == 0,
+                          strcmp( pSlot, "hair" ) == 0 || strcmp( pSlot, "beard" ) == 0 ||
+                              strcmp( pSlot, "glasses" ) == 0 || strcmp( pSlot, "helmet" ) == 0 } );
     }
 
     // Body (material variant of the BodyID) and head.
@@ -326,7 +330,9 @@ bool EdenAvatar::load( EdenAvatarLibrary &library, const char *pConfigId ) {
             }
         }
     }
-    loadPart( bodies, body.pHead, body.pHead );
+    if ( loadPart( bodies, body.pHead, body.pHead ) != nullptr ) {
+        headParts.push_back( parts.size() - 1 );
+    }
     applySkin( library.getConfigBank().findEntry( avtName.c_str(), "avt" ) );
 
     for ( const Worn &item : worn ) {
@@ -338,6 +344,9 @@ bool EdenAvatar::load( EdenAvatarLibrary &library, const char *pConfigId ) {
         EdenModel *pModel = loadPart( *pBank, base.c_str(), base.c_str() );
         if ( pModel == nullptr ) {
             continue;
+        }
+        if ( item.bHead ) {
+            headParts.push_back( parts.size() - 1 );
         }
         if ( item.bHair ) {
             // FUN_00cb2080: hair colour index -> HAIR_MAT palette material
@@ -386,9 +395,13 @@ bool EdenAvatar::load( EdenAvatarLibrary &library, const char *pConfigId ) {
 }
 
 void EdenAvatar::draw( EdenRenderer &renderer, const Matrix4x4f &world,
-                       const std::vector<Matrix4x4f> &skinMatrices, const EdenAvatarLighting *pLighting ) const {
-    for ( const auto &pPart : parts ) {
-        pPart->drawSkinned( renderer, world, skinMatrices, pLighting );
+                       const std::vector<Matrix4x4f> &skinMatrices, const EdenAvatarLighting *pLighting,
+                       bool bDrawHead ) const {
+    for ( size_t i = 0; i < parts.size(); i++ ) {
+        if ( !bDrawHead && std::find( headParts.begin(), headParts.end(), i ) != headParts.end() ) {
+            continue;
+        }
+        parts[i]->drawSkinned( renderer, world, skinMatrices, pLighting );
     }
 }
 

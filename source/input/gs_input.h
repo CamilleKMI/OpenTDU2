@@ -86,6 +86,14 @@ public:
     // Raw key press this frame (SDL scancode, debug keys not in the key maps).
     bool wasKeyPressed( int32_t scancode ) const;
 
+    // Device of the last user input (keyboard/mouse or pad). The game itself
+    // uses the controller selected in the options instead: profile +0x45
+    // IsX360PadIconsUsed = (selected device type == 3) (FUN_0093d620,
+    // FUN_00acaaf0 -> flash "/:IsPC_X360"), and FUN_00d87cc0 picks the pad
+    // bitmap form per key map entry (DevSubType == 3).
+    enum class eDevice : uint8_t { D_Keyboard = 0, D_Pad };
+    eDevice getLastDevice() const { return lastDevice; }
+
     // Scripted input injection (automated tests).
     void injectPress( eInputAction action ) { injectedPresses.push_back( action ); }
     void injectMouseDelta( float dx, float dy ) { injectedMouseX += dx; injectedMouseY += dy; }
@@ -120,6 +128,7 @@ private:
     float rightStick[2] = { 0.0f, 0.0f };
     bool bStartReleased = false;
     float steeringAxis;
+    eDevice lastDevice = eDevice::D_Keyboard;
 
 private:
     void loadDefaultBindings();

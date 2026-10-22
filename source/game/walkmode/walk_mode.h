@@ -2,6 +2,7 @@
 
 #include "game/walkmode/walk_controller.h"
 
+#include <functional>
 #include <string>
 
 class IntroCinematic;
@@ -20,6 +21,11 @@ public:
     void clearSelection( IntroCinematic &scene );
 
     inline const Vector3f &getPosition() const { return controller.getPosition(); }
+    inline Vector3f getForward() const { return controller.getForward(); }
+    // Selectables refused by the filter are not picked (FIRST_WM: the "car"
+    // item needs the driver door open, FUN_009aa560 carReady).
+    using SelectableFilter = std::function<bool( int32_t index )>;
+    void setSelectableFilter( SelectableFilter filter ) { selectableFilter = std::move( filter ); }
     inline int32_t getSelected() const { return selected; }
     // /:SelItemType of the selection ("garage", "car"...), empty if none.
     const char *getSelectedType( const IntroCinematic &scene ) const;
@@ -30,6 +36,7 @@ private:
     float eyeHeight = 1.48f;
     int32_t selected = -1;
     float cooldown = 0.0f;
+    SelectableFilter selectableFilter;
 
     Vector3f collide( const IntroCinematic &scene, const Vector3f &from, const Vector3f &to ) const;
     void updateSelection( IntroCinematic &scene, float deltaTime );

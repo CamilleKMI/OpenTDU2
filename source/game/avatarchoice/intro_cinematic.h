@@ -106,6 +106,21 @@ public:
     // GENERAL pop_goal (FUN_00d61790 / FUN_00d61700).
     void showGoal( const std::string &text );
     void closeGoal();
+    // GENERAL pop_tutorial ("Tip" box, FUN_00d62ed0 / FUN_00d61600): /:TutText
+    // then goto "open_tuto" (/:IsWalkmode false: the non-WM animation);
+    // close_popup().
+    void showTutorial( const std::string &text );
+    void closeTutorial();
+    // The scene car (FIRST_WM: the California): world / scene-local pose.
+    inline CinematicCar &getCar() { return car; }
+    inline const CinematicCar &getCar() const { return car; }
+    bool getCarWorld( Matrix4x4f &outWorld ) const;
+    bool getCarLocal( Matrix4x4f &outLocal ) const;
+    // Player avatar seated at the car driver seat (DVRSEAT_LR) with the
+    // avatarsdriver.bnk drive pose (anims\car\stance_turn.xan) and the
+    // driveiklayer6 IK (hands / feet / back on the car nodes); replaces the
+    // .sce "Avatar" actor while set (C_OUTRO message avm4:CIN_CAR) [INF].
+    bool setPlayerSeated( bool bSeated );
     // Overrides the camera (walk mode); nullptr: cinematic camera.
     void setCameraOverride( const EdenSceneView::Camera *pCamera );
     inline const EdenSceneView::Camera &getCamera() const { return camera; }
@@ -205,6 +220,22 @@ private:
     std::vector<Volume> volumes;
     std::vector<Volume> selectables;
     float goalTimer = -1.0f;
+    Bank driverBank;               // scenarics/avatars/avatarsdriver.bnk
+    EdenAnimation driverPose;
+    bool bDriverPose = false;
+    // IKOffsetDB.bin record of the car for the player's sex
+    // (docs/re/driver_seat_spec.md): seat group adjustment (y, z) and the
+    // offsets of the 27 cockpit nodes (DvrSeat, Hand_R, Hand_L, Foot_R,
+    // Foot_L, Radio, Back_L, ...) in their node frame.
+    struct DriverIKOffsets {
+        bool bValid = false;
+        float SeatY = 0.0f, SeatZ = 0.0f;
+        Vector3f Node[27];
+    } driverIK;
+    bool bDriverIKLoaded = false;
+    bool loadDriverIKOffsets( int32_t idCar, bool bWoman );
+    bool bPlayerSeated = false;
+    void updateSeatedPlayer();
     std::string weatherName;
     std::string modifierName;
     EdenSceneView::Camera camera;   // last camera

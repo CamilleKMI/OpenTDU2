@@ -13,6 +13,32 @@ class Font;
 class FlashPlayer {
 public:
     using FSCommandCallback = std::function<void( const std::string &command, const std::string &args )>;
+    // '#command:<ACTION>#' markup of read only text fields (FUN_00849dd0:
+    // the global resolver DAT_013e281c, vtable 0x00ee6ff0, vfunc +4 =
+    // FUN_00d87cc0 returns a markup string laid out in place, recursively).
+    // Empty result: the markup is dropped.
+    using CommandResolver = std::function<std::string( const std::string &action )>;
+    static void SetCommandResolver( CommandResolver resolver );
+    // Pad form of FUN_00d87cc0 for a key map entry whose DevSubType (+0x179)
+    // is 3 (X360 pad): channel name -> "#bitmap:x360_..#" (table
+    // FUN_00d877b0, strings 0x00ee6270..0x00ee64b8). Empty for an unknown
+    // channel (0x00f35018 "").
+    static std::string PadChannelMarkup( const std::string &channel );
+    // Keyboard form of FUN_00d87cc0 (format 0x00ee61f4, key map entry +0x60
+    // ChannelLocName).
+    static std::string KeyboardChannelMarkup( const std::string &channelLocName );
+
+    // '#bitmap:<name>#' inline images: global registry DAT_013e2720 filled
+    // from the named children of a "$$bitmaps$$" sprite (FUN_0085ad40 /
+    // FUN_00dd8830; GENERAL.vmf ch612: x360_* and PS3_* button icons).
+    struct TextBitmap {
+        const FlashPlayer *pOwner = nullptr;
+        GPUTexture *pTexture = nullptr;
+        float U0 = 0.0f, V0 = 0.0f, U1 = 1.0f, V1 = 1.0f;
+        float Width = 0.0f, Height = 0.0f; // bitmap pixels (object +0xa / +0xc)
+        float ScaleX = 1.0f, ScaleY = 1.0f; // placement scale in "$$bitmaps$$"
+    };
+    static const TextBitmap *FindTextBitmap( const std::string &name );
 
     struct Clip;
     struct Object;
@@ -141,6 +167,7 @@ private:
     void placeObject( Clip &clip, const FlashPlaceInfo &place, bool bQueueActions );
     void removeObject( Clip &clip, uint16_t depth );
     void initClip( Instance &instance, Clip *pParent, bool bQueueActions );
+    void registerTextBitmap( const Instance &instance );
     void runPendingActions();
     bool resolveFrame( Clip &clip, const Value &frame, uint32_t &outFrame );
 

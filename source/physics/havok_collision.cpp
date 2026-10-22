@@ -42,6 +42,8 @@ constexpr uint32_t kMoppChildShape = 0x34;
 // hkpConvexTransformShape: m_childShape container @0x14, m_transform @0x20
 constexpr uint32_t kConvexTransformChild = 0x18;
 constexpr uint32_t kConvexTransformTransform = 0x20;
+constexpr uint32_t kTransformShapeChild = 0x14;     // hkpTransformShape childShape.childShape
+constexpr uint32_t kTransformShapeTransform = 0x30; // hkpTransformShape transform
 // hkpListShape
 constexpr uint32_t kListChildInfo = 0x18; // hkArray<hkpListShapeChildInfo> (0x10 each, shape @0)
 constexpr uint32_t kListChildInfoSize = 0x10;
@@ -246,6 +248,22 @@ struct Builder {
         } else if ( *pClass == "hkpConvexTransformShape" && pack.valid( shape, 0x60 ) ) {
             const Matrix4x4f local = pack.transform( shape + kConvexTransformTransform );
             addShape( pack.ptr( shape + kConvexTransformChild ), xform * local, depth + 1 );
+        } else if ( *pClass == "hkpTransformShape" && pack.valid( shape, 0x70 ) ) {
+            // hkpTransformShape (0x70, reflection): childShape
+            // hkpSingleShapeContainer at +0x10 (pointer at +0x14), rotation
+            // quaternion +0x20, transform hkTransform +0x30 [DATA:
+            // eph_l3di_sc_*.shk].
+            const Matrix4x4f local = pack.transform( shape + kTransformShapeTransform );
+            addShape( pack.ptr( shape + kTransformShapeChild ), xform * local, depth + 1 );
+        } else if ( *pClass == "hkpSphereShape" && pack.valid( shape, 0x20 ) ) {
+            // hkpSphereShape (0x20): radius = hkpConvexShape +0x10, centred
+            // on the shape origin [DATA: Library.dhk]. Stored as a capsule
+            // with a zero length segment.
+            HavokCollision::Capsule sphere;
+            sphere.A = sphere.B = xform.transformPoint( Vector3f( 0.0f, 0.0f, 0.0f ) );
+            sphere.Radius = pack.f32( shape + kConvexRadius );
+            sphere.BodyIndex = bodyIndex;
+            out.Capsules.push_back( sphere );
         } else if ( *pClass == "hkpListShape" && pack.valid( shape, 0x70 ) ) {
             uint32_t children = 0, count = 0;
             if ( !pack.array( shape + kListChildInfo, kListChildInfoSize, children, count ) ) {

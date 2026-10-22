@@ -40,10 +40,28 @@ public:
     Matrix4x4f fitOnGround( Vector3f position, const Quaternionf &rotation,
                             const SurfaceFunction &surfaceHeight ) const;
     void assignEnvironment( EdenRenderer &renderer, GPUTexture *pCube );
+    // Door opening (docs: /tmp/claude-0/spec_garage_car.md 3): side 0 left
+    // (DOOR_L, car slot 29), 1 right (DOOR_R, 30). FUN_00c67230 /
+    // FUN_00c67200 store the angle at car +0xa794 / +0xa790; without the
+    // DOOR_x_A_n key nodes (absent on the California) FUN_00c67020 rotates the
+    // door node about its local Y axis by that angle (FUN_00ddbcd0). The
+    // door subtree (mirror, window, INT_LR_x) and the interior bank panel
+    // INT_HR_x (instanced on the door, FUN_00c69e30) follow.
+    void setDoorAngle( int32_t side, float angle );
+    inline float getDoorAngle( int32_t side ) const { return doorAngle[side & 1]; }
+    // Model space transform of a car node (names longer than 8 characters
+    // are folded, e.g. DVRSEAT_LR); false if absent.
+    bool getNodeModelTransform( const char *pName, Matrix4x4f &outTransform ) const;
+    // Model space bounds of the high resolution body (BODY_HR).
+    bool getBodyBounds( Vector3f &outMin, Vector3f &outMax ) const;
     void draw( EdenRenderer &renderer, const Matrix4x4f &world, const WeatherPreset *pWeather,
                bool bEnvironmentAssigned );
 
+    // DBCarPhysicsData._id_car of the loaded car file (-1 if unknown).
+    int32_t getIdCar() const;
+
 private:
+    std::string fileName; // Desc::FileName actually loaded
     Bank carBank;
     Bank carCommonBank;
     Bank rimBank;
@@ -68,6 +86,14 @@ private:
     std::vector<int32_t> cockpitLowNodes;    // car nodes
     std::vector<int32_t> interiorDrawnNodes; // interior nodes (COCK_HR subtree, INT_HR_L/R)
     bool bLastInterior = false;
+    struct DoorNodes {
+        int32_t Door = -1;
+        Matrix4x4f DoorRest;
+        std::vector<std::pair<int32_t, Matrix4x4f>> CarRest;      // DOOR_x subtree
+        std::vector<std::pair<int32_t, Matrix4x4f>> InteriorRest; // INT_HR_x subtree
+    };
+    DoorNodes doors[2];
+    float doorAngle[2] = { 0.0f, 0.0f };
     std::vector<int32_t> wheelNodes;
     std::vector<int32_t> wheelShadowNodes;
     int32_t tireNodeFront = -1;

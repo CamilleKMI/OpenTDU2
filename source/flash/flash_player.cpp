@@ -1,6 +1,79 @@
 #include "shared.h"
 #include "flash_player.h"
 
+namespace {
+FlashPlayer::CommandResolver gCommandResolver;
+// DAT_013e2720: name -> {scale x, scale y, bitmap} (FUN_00dd85c0 lookup).
+std::map<std::string, FlashPlayer::TextBitmap> gTextBitmaps;
+} // namespace
+
+void FlashPlayer::SetCommandResolver( CommandResolver resolver ) { gCommandResolver = std::move( resolver ); }
+
+std::string FlashPlayer::PadChannelMarkup( const std::string &channel ) {
+    // FUN_00d877b0 (and the BUTTON_0 test inlined in FUN_00d87cc0).
+    static const char *const kTable[][2] = {
+        { "BUTTON_0", "x360_A" },          { "BUTTON_1", "x360_B" },
+        { "BUTTON_2", "x360_X" },          { "BUTTON_3", "x360_Y" },
+        { "BUTTON_4", "x360_LB" },         { "BUTTON_5", "x360_RB" },
+        { "BUTTON_6", "x360_LT" },         { "BUTTON_7", "x360_RT" },
+        { "BUTTON_8", "x360_Start" },      { "BUTTON_9", "x360_Back" },
+        { "BUTTON_10", "x360_LS_clic" },   { "BUTTON_11", "x360_RS_clic" },
+        { "STICK_0_LEFT", "x360_LS" },     { "STICK_0_RIGHT", "x360_LS" },
+        { "STICK_0_UP", "x360_LS_Up" },    { "STICK_0_DOWN", "x360_LS_Down" },
+        { "STICK_1_LEFT", "x360_RS" },     { "STICK_1_RIGHT", "x360_RS" },
+        { "STICK_1_UP", "x360_RS" },       { "STICK_1_DOWN", "x360_RS" },
+        { "LEFT", "x360_DPad_Left" },      { "RIGHT", "x360_DPad_Right" },
+        { "UP", "x360_DPad_Up" },          { "DOWN", "x360_DPad_Down" },
+    };
+    for ( const auto &entry : kTable ) {
+        if ( channel == entry[0] ) {
+            return std::string( "#bitmap:" ) + entry[1] + "#";
+        }
+    }
+    return "";
+}
+
+std::string FlashPlayer::KeyboardChannelMarkup( const std::string &channelLocName ) {
+    return "#color:ff6600#[" + channelLocName + "]#endcolor#";
+}
+
+const FlashPlayer::TextBitmap *FlashPlayer::FindTextBitmap( const std::string &name ) {
+    auto it = gTextBitmaps.find( name );
+    return it != gTextBitmaps.end() ? &it->second : nullptr;
+}
+
+void FlashPlayer::registerTextBitmap( const Instance &instance ) {
+    // FUN_00dd8830: the first object of the named sprite's display list must
+    // be a shape whose first fill is a bitmap fill (0x40..0x43); the scale is
+    // the length of the columns of the sprite's own placement matrix
+    // (FUN_0084e340 / FUN_0084e310).
+    if ( instance.Name.empty() || instance.pClip == nullptr || instance.pClip->DisplayList.empty() ) {
+        return;
+    }
+    const Instance &child = *instance.pClip->DisplayList.begin()->second;
+    if ( definitions.getType( child.CharacterId ) != eFlashCharacterType::CT_Shape ) {
+        return;
+    }
+    const FlashShape *pShape = definitions.getShape( child.CharacterId );
+    if ( pShape == nullptr || pShape->Fills.empty() || pShape->Fills[0].Type != eFlashFillType::FF_Bitmap ||
+         pShape->Fills[0].pTexture == nullptr ) {
+        return;
+    }
+    const FlashFill &fill = pShape->Fills[0];
+    TextBitmap bitmap;
+    bitmap.pOwner = this;
+    bitmap.pTexture = fill.pTexture;
+    bitmap.U0 = fill.U0;
+    bitmap.V0 = fill.V0;
+    bitmap.U1 = fill.U1;
+    bitmap.V1 = fill.V1;
+    bitmap.Width = fill.BitmapWidth;
+    bitmap.Height = fill.BitmapHeight;
+    bitmap.ScaleX = std::sqrt( instance.Matrix.A * instance.Matrix.A + instance.Matrix.B * instance.Matrix.B );
+    bitmap.ScaleY = std::sqrt( instance.Matrix.C * instance.Matrix.C + instance.Matrix.D * instance.Matrix.D );
+    gTextBitmaps[instance.Name] = bitmap;
+}
+
 #include "config/gs_config.h"
 
 #include "flash/flash_movie.h"
@@ -223,6 +296,10 @@ bool FlashPlayer::load( FlashMovie *pFlashMovie ) {
 }
 
 void FlashPlayer::unload() {
+    // FUN_0085d500 -> FUN_00dd8770(DAT_013e2720): the movie's entries go.
+    for ( auto it = gTextBitmaps.begin(); it != gTextBitmaps.end(); ) {
+        it = it->second.pOwner == this ? gTextBitmaps.erase( it ) : std::next( it );
+    }
     root.DisplayList.clear();
     root.Variables.clear();
     graveyard.clear();
@@ -425,6 +502,11 @@ void FlashPlayer::placeObject( Clip &clip, const FlashPlaceInfo &place, bool bQu
     }
     if ( place.ClipDepth != 0 ) {
         pInstance->ClipDepth = place.ClipDepth;
+    }
+    // FUN_0085ad40: a sprite named "$$bitmaps$$" gets flag +0x44; the named
+    // objects placed into it register their bitmap (FUN_00dd8830).
+    if ( clip.pInstance != nullptr && clip.pInstance->Name == "$$bitmaps$$" && place.bHasCharacter ) {
+        registerTextBitmap( *pInstance );
     }
 }
 
@@ -1897,13 +1979,55 @@ void FlashPlayer::drawEditText( Renderer2D &renderer, const FlashEditText &text,
     }
     if ( CmdLine::HasArg( "-logtext" ) ) {
         const FlashFontDesc *pLogDesc = pMovie->getVMF().findFont( text.FontId );
-        OTDU_LOG_INFO( "Text '%s' var '%s' font %u '%s' color %08x tex %p\n", content.c_str(), text.VariableName.c_str(),
-                       text.FontId, pLogDesc != nullptr ? pLogDesc->Name.c_str() : "?", colorTransform.apply( text.Color ),
-                       static_cast<const void *>( pFont->getTexture() ) );
+        OTDU_LOG_INFO( "Text '%s' var '%s' font %u '%s' height %.0f asc %d desc %d color %08x tex %p\n",
+                       content.c_str(), text.VariableName.c_str(), text.FontId,
+                       pLogDesc != nullptr ? pLogDesc->Name.c_str() : "?", text.FontHeight,
+                       pLogDesc != nullptr ? pLogDesc->Ascent : 0, pLogDesc != nullptr ? pLogDesc->Descent : 0,
+                       colorTransform.apply( text.Color ), static_cast<const void *>( pFont->getTexture() ) );
     }
     for ( char &c : content ) {
         if ( c == '\r' ) {
             c = '\n';
+        }
+    }
+    if ( text.bReadOnly && gCommandResolver && content.find( "#command:" ) != std::string::npos ) {
+        // FUN_00849dd0 "command:" branch: the text between "#command:" and
+        // the next '#' (at most 0x7f characters) goes to the resolver; its
+        // string is laid out in place (recursive call), e.g. the keyboard
+        // form "#color:ff6600#[%s]#endcolor#" of FUN_00d87cc0.
+        std::string expanded;
+        for ( int32_t depth = 0; depth < 4 && content.find( "#command:" ) != std::string::npos; depth++ ) {
+            expanded.clear();
+            size_t i = 0;
+            while ( i < content.size() ) {
+                const size_t start = content.find( "#command:", i );
+                if ( start == std::string::npos ) {
+                    expanded += content.substr( i );
+                    break;
+                }
+                expanded += content.substr( i, start - i );
+                const size_t close = content.find( '#', start + 9 );
+                if ( close == std::string::npos ) {
+                    expanded += content.substr( start );
+                    break;
+                }
+                const std::string action = content.substr( start + 9, Min<size_t>( close - start - 9, 0x7f ) );
+                // Test aid: "-padcommand ACTION=CHANNEL[,...]" stands for a
+                // key map entry on an X360 pad (DevSubType 3), whose default
+                // assignment is not in the data (only Default_KB.xmb ships).
+                std::string padMarkup;
+                if ( const char *pPad = CmdLine::GetArgValue( "-padcommand" ) ) {
+                    const std::string list = std::string( "," ) + pPad + ",";
+                    const size_t at = list.find( "," + action + "=" );
+                    if ( at != std::string::npos ) {
+                        const size_t from = at + action.size() + 2;
+                        padMarkup = PadChannelMarkup( list.substr( from, list.find( ',', from ) - from ) );
+                    }
+                }
+                expanded += !padMarkup.empty() ? padMarkup : gCommandResolver( action );
+                i = close + 1;
+            }
+            content = expanded;
         }
     }
 
@@ -1922,6 +2046,8 @@ void FlashPlayer::drawEditText( Renderer2D &renderer, const FlashEditText &text,
         pDesc != nullptr ? pDesc->Ascent : static_cast<int32_t>( std::lround( pFont->getAscent() * 1024.0f ) );
     const int32_t fontLeading =
         pDesc != nullptr ? pDesc->Leading : static_cast<int32_t>( std::lround( pFont->getEmLeading() * 1024.0f ) );
+    // layout +0x38 (font descent), used by the inline bitmaps only.
+    const int32_t descent = pDesc != nullptr ? pDesc->Descent : 0;
     const int32_t fontHeight = Max( static_cast<int32_t>( text.FontHeight ), 1 );
     const int32_t pitch = ( static_cast<int32_t>( text.Leading ) * 1024 ) / fontHeight + 1024 + fontLeading;
     // Rect: every value + 40 twips (FUN_0083f6c0), size unchanged.
@@ -1942,13 +2068,41 @@ void FlashPlayer::drawEditText( Renderer2D &renderer, const FlashEditText &text,
         int32_t X = 0;
         int32_t Y = 0;
         uint32_t Color = 0;
+        const TextBitmap *pBitmap = nullptr; // '#bitmap:..#' record (negative code in Eden)
+        int32_t BitmapHeight = 0;
     };
     std::vector<Record> records;
     {
         uint32_t currentColor = color;
+        int32_t numBitmaps = 0; // layout +0x988, at most 0x20
         size_t i = 0;
         while ( i < content.size() ) {
             if ( text.bReadOnly && content[i] == '#' ) {
+                if ( content.compare( i, 8, "#bitmap:" ) == 0 ) {
+                    const size_t close = content.find( '#', i + 1 );
+                    if ( close != std::string::npos ) {
+                        // FUN_00849cc0: width = (Ascent - Descent) * w / 20.0 *
+                        // scale x (ftol), in font units; record code -n,
+                        // advance = width; nothing when the name is unknown.
+                        const std::string name = content.substr( i + 8, Min<size_t>( close - i - 8, 0x7f ) );
+                        const TextBitmap *pBitmap = FindTextBitmap( name );
+                        if ( pBitmap != nullptr && numBitmaps < 0x20 ) {
+                            numBitmaps++;
+                            Record record;
+                            record.Code = 0xffffffffu - static_cast<uint32_t>( numBitmaps - 1 );
+                            record.pBitmap = pBitmap;
+                            record.Color = color;
+                            record.Advance =
+                                static_cast<int32_t>( ( ascent - descent ) * pBitmap->Width / 20.0 * pBitmap->ScaleX );
+                            // FUN_00848c90: height with +0xc and scale y.
+                            record.BitmapHeight = static_cast<int32_t>( ( ascent - descent ) * pBitmap->Height /
+                                                                        20.0 * pBitmap->ScaleY );
+                            records.push_back( record );
+                        }
+                        i = close + 1;
+                        continue;
+                    }
+                }
                 if ( content.compare( i, 7, "#color:" ) == 0 ) {
                     const size_t close = content.find( '#', i + 7 );
                     if ( close != std::string::npos && ( close - i - 7 == 6 || close - i - 7 == 8 ) ) {
@@ -2155,4 +2309,40 @@ void FlashPlayer::drawEditText( Renderer2D &renderer, const FlashEditText &text,
         }
     }
     renderer.drawTriangles( pFont->getTexture(), vertices.data(), static_cast<uint32_t>( vertices.size() ), true );
+
+    // Inline bitmaps, after the glyphs (FUN_0083e390 second loop over
+    // layout +0x988, rect FUN_00848c90): x0 = pen, x1 = pen + advance,
+    // bottom = baseline + (Ascent + Descent + H) * 0.5 - Ascent, top =
+    // bottom - H (centred on the ascent/descent box); white, through the
+    // text's colour transform.
+    const uint32_t bitmapColor = colorTransform.apply( 0xffffffff );
+    for ( const Line &line : lines ) {
+        for ( int32_t r = line.First; r <= line.Last && r < static_cast<int32_t>( records.size() ); r++ ) {
+            const Record &record = records[r];
+            if ( record.pBitmap == nullptr || record.pBitmap->pTexture == nullptr ) {
+                continue;
+            }
+            const float bitmapBottom =
+                static_cast<float>( record.Y ) +
+                ( static_cast<float>( ascent + descent + record.BitmapHeight ) * 0.5f - static_cast<float>( ascent ) );
+            const float x0 = static_cast<float>( record.X ) * s;
+            const float x1 = static_cast<float>( record.X + record.Advance ) * s;
+            const float y0 = ( bitmapBottom - static_cast<float>( record.BitmapHeight ) ) * s;
+            const float y1 = bitmapBottom * s;
+            const TextBitmap &bitmap = *record.pBitmap;
+            const float corners[4][4] = { { x0, y0, bitmap.U0, bitmap.V0 },
+                                          { x1, y0, bitmap.U1, bitmap.V0 },
+                                          { x1, y1, bitmap.U1, bitmap.V1 },
+                                          { x0, y1, bitmap.U0, bitmap.V1 } };
+            static const int kOrder[6] = { 0, 1, 2, 0, 2, 3 };
+            Vertex2D quad[6];
+            for ( int k = 0; k < 6; k++ ) {
+                toCanvas.transform( corners[kOrder[k]][0], corners[kOrder[k]][1], quad[k].X, quad[k].Y );
+                quad[k].U = corners[kOrder[k]][2];
+                quad[k].V = corners[kOrder[k]][3];
+                quad[k].Color = bitmapColor;
+            }
+            renderer.drawTriangles( bitmap.pTexture, quad, 6 );
+        }
+    }
 }

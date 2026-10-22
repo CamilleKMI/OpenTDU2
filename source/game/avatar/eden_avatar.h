@@ -50,12 +50,13 @@ public:
 
     // skinMatrices: EdenSkeleton::computeSkinMatrices of the current pose.
     void draw( EdenRenderer &renderer, const Matrix4x4f &world, const std::vector<Matrix4x4f> &skinMatrices,
-               const struct EdenAvatarLighting *pLighting = nullptr ) const;
+               const struct EdenAvatarLighting *pLighting = nullptr, bool bDrawHead = true ) const;
 
 private:
     const EdenSkeleton *pSkeleton = nullptr;
     bool bWoman = false;
     std::vector<std::unique_ptr<EdenModel>> parts;
+    std::vector<size_t> headParts; // head mesh and the clothes worn on it
 
     // FUN_00cbe2a0 / FUN_00cbe1a0 / FUN_00cbe220: .avt skin values into the
     // TD_Skin2 / TD_Skinface materials (docs/re/skin_zones_spec.md).

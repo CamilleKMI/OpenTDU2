@@ -1,0 +1,19 @@
+# Normalise text files to LF in the repository
+* text=auto eol=lf
+
+*.sh     text eol=lf
+*.cpp    text eol=lf
+*.h      text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.cmake  text eol=lf
+*.bat    text eol=crlf
+
+# Binary files
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.spv  binary
+*.ttf  binary

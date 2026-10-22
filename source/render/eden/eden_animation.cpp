@@ -303,3 +303,118 @@ void BlendPoses( const std::vector<BoneTransform> &a, const std::vector<BoneTran
         out[i].Scale = a[i].Scale + ( b[i].Scale - a[i].Scale ) * weightB;
     }
 }
+
+namespace {
+// Model-space rotation (actual rotation, i.e. the conjugate of the engine
+// quaternion composed down the chain) and position of every bone.
+void ComputeModelPose( const EdenSkeleton &skeleton, const std::vector<BoneTransform> &locals,
+                       std::vector<Quaternionf> &outRotations, std::vector<Vector3f> &outPositions ) {
+    std::vector<Matrix4x4f> world, skin;
+    skeleton.computeSkinMatrices( locals, world, skin );
+    const uint32_t count = skeleton.getNumBones();
+    outRotations.resize( count );
+    outPositions.resize( count );
+    for ( uint32_t i = 0; i < count; i++ ) {
+        const Quaternionf &q = locals[i].Rotation;
+        const Quaternionf local = Normalize( Quaternionf( -q.x, -q.y, -q.z, q.w ) );
+        const int32_t parent = skeleton.getParent( i );
+        outRotations[i] = parent >= 0 ? Normalize( outRotations[parent] * local ) : local;
+        outPositions[i] = world[i].getTranslation();
+    }
+}
+
+Quaternionf Conjugate( const Quaternionf &q ) {
+    return Quaternionf( -q.x, -q.y, -q.z, q.w );
+}
+
+// Model-space rotation 'delta' applied to 'bone' (about its own origin).
+void RotateBoneModel( const EdenSkeleton &skeleton, std::vector<BoneTransform> &locals,
+                      const std::vector<Quaternionf> &rotations, int32_t bone, const Quaternionf &delta ) {
+    const int32_t parent = skeleton.getParent( bone );
+    const Quaternionf parentRotation = parent >= 0 ? rotations[parent] : Quaternionf();
+    const Quaternionf world = Normalize( delta * rotations[bone] );
+    const Quaternionf local = Normalize( Conjugate( parentRotation ) * world );
+    locals[bone].Rotation = Conjugate( local );
+}
+
+// Rotation taking direction a onto direction b.
+Quaternionf RotationBetween( const Vector3f &a, const Vector3f &b ) {
+    const Vector3f na = a.normalized(), nb = b.normalized();
+    const float cosAngle = Clamp( na.dot( nb ), -1.0f, 1.0f );
+    Vector3f axis = na.cross( nb );
+    if ( axis.length() < 1e-6f ) {
+        return Quaternionf();
+    }
+    return Quaternionf::FromAxisAngle( axis, std::acos( cosAngle ) );
+}
+} // namespace
+
+namespace {
+void SolveTwoBoneOnce( const EdenSkeleton &skeleton, std::vector<BoneTransform> &locals, int32_t root, int32_t mid,
+                       int32_t effector, const Vector3f &goal, int32_t keepWorld, const Quaternionf &keptRotation ) {
+    std::vector<Quaternionf> rotations;
+    std::vector<Vector3f> positions;
+    ComputeModelPose( skeleton, locals, rotations, positions );
+    const Vector3f a = positions[root], b = positions[mid], c = positions[effector];
+    const float lab = ( b - a ).length(), lcb = ( c - b ).length();
+    const float lat = Clamp( ( goal - a ).length(), 1e-4f, ( lab + lcb ) * 0.9999f );
+    if ( lab < 1e-5f || lcb < 1e-5f ) {
+        return;
+    }
+    auto angleBetween = []( const Vector3f &u, const Vector3f &v ) {
+        return std::acos( Clamp( u.normalized().dot( v.normalized() ), -1.0f, 1.0f ) );
+    };
+    const float rootAngle0 = angleBetween( c - a, b - a );
+    const float midAngle0 = angleBetween( a - b, c - b );
+    const float rootAngle1 = std::acos( Clamp( ( lcb * lcb - lab * lab - lat * lat ) / ( -2.0f * lab * lat ), -1.0f, 1.0f ) );
+    const float midAngle1 = std::acos( Clamp( ( lat * lat - lab * lab - lcb * lcb ) / ( -2.0f * lab * lcb ), -1.0f, 1.0f ) );
+    // Bend plane of the clip pose.
+    Vector3f axis = ( c - a ).cross( b - a );
+    if ( axis.length() < 1e-6f ) {
+        axis = ( goal - a ).cross( b - a );
+    }
+    if ( axis.length() < 1e-6f ) {
+        return;
+    }
+    axis = axis.normalized();
+    RotateBoneModel( skeleton, locals, rotations, mid, Quaternionf::FromAxisAngle( axis, midAngle1 - midAngle0 ) );
+    ComputeModelPose( skeleton, locals, rotations, positions );
+    RotateBoneModel( skeleton, locals, rotations, root, Quaternionf::FromAxisAngle( axis, rootAngle1 - rootAngle0 ) );
+    ComputeModelPose( skeleton, locals, rotations, positions );
+    RotateBoneModel( skeleton, locals, rotations, root,
+                     RotationBetween( positions[effector] - positions[root], goal - positions[root] ) );
+    if ( keepWorld >= 0 ) {
+        ComputeModelPose( skeleton, locals, rotations, positions );
+        const int32_t parent = skeleton.getParent( keepWorld );
+        const Quaternionf parentRotation = parent >= 0 ? rotations[parent] : Quaternionf();
+        locals[keepWorld].Rotation = Conjugate( Normalize( Conjugate( parentRotation ) * keptRotation ) );
+    }
+}
+} // namespace
+
+void SolveTwoBoneIK( const EdenSkeleton &skeleton, std::vector<BoneTransform> &locals, int32_t root, int32_t mid,
+                     int32_t effector, const Vector3f &goal, int32_t keepWorld ) {
+    if ( root < 0 || mid < 0 || effector < 0 ) {
+        return;
+    }
+    std::vector<Quaternionf> rotations;
+    std::vector<Vector3f> positions;
+    ComputeModelPose( skeleton, locals, rotations, positions );
+    const Quaternionf keptRotation = keepWorld >= 0 ? rotations[keepWorld] : Quaternionf();
+    // The kept bone carries the effector: re-solve until it settles.
+    for ( int i = 0; i < ( keepWorld >= 0 ? 6 : 1 ); i++ ) {
+        SolveTwoBoneOnce( skeleton, locals, root, mid, effector, goal, keepWorld, keptRotation );
+    }
+}
+
+void SolveAimIK( const EdenSkeleton &skeleton, std::vector<BoneTransform> &locals, int32_t bone, int32_t effector,
+                 const Vector3f &goal ) {
+    if ( bone < 0 || effector < 0 ) {
+        return;
+    }
+    std::vector<Quaternionf> rotations;
+    std::vector<Vector3f> positions;
+    ComputeModelPose( skeleton, locals, rotations, positions );
+    RotateBoneModel( skeleton, locals, rotations, bone,
+                     RotationBetween( positions[effector] - positions[bone], goal - positions[bone] ) );
+}

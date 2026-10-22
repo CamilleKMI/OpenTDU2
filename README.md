@@ -125,7 +125,7 @@ Each one is marked `[INF]` (inferred) in the sources and documented in `docs/re/
 
 | Topic | What is approximate | Why |
 |---|---|---|
-| Car driving | Tyre grip, suspension and the Havok vehicle tuning; the simulation is a raycast vehicle fed with the game's data (DB car record, `Physics.cpr`, torque curves, mass / inertia from `.dhk`) | The game uses the Havok 5.5 vehicle SDK; its tuning objects and the `.bpjka` tyre file layout are not decoded yet |
+| Car driving | The constraint solver itself (integration, low-speed slip, differential limit, clutch / shift points, ABS / TCS regulation, aero application point, chassis inertia) | TDU2 cars do not use the Havok vehicle SDK but Eden's own `edVehicle` library; the car setup (DB physics record, `Physics.cpr [Car]`, Pacejka tyre files from `tires.bnk`, DBRims radius, aero, brakes, gearbox) and the tyre force formulas are decoded and used, the solver core is not reimplemented (see `docs/re/vehicle_physics_spec.md`) |
 | Chase camera | Camera motion (lag, lean, shake) | Positions and FOV come from `camerasingame.xmb`; the update code was not found |
 | HUD | Minimap road drawing, zone lookup, which gauge-bank texture is the dial / the needle, in-car DASHBRD screen not drawn | Map drawing and zone lookup are encrypted; texture arguments are lost in the readable code |
 | Walk mode | Mouse sensitivity, body radius (0.3 m), step height, strafing on left/right | The walk controller and its camera are encrypted; speeds and head limits come from `avatarsdriver.bnk` |

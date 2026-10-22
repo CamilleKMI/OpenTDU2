@@ -69,6 +69,24 @@ private:
     static Vector4f SampleChannel( const Channel &channel, float time, bool bRotation );
 };
 
+// Driver IK (docs: /tmp/claude-0/spec_driver_seat.md). The IK chains are the
+// ones of avatarsdriver.bnk anims\car\driveiklayer6.bas [DATA]: Spine ->
+// IK_Back (node type 6), Arm_x / ForeArm_x -> IK_x_Hand and UpLeg_x / Leg_x
+// -> IK_x_Foot (type 2). The solver itself is in the encrypted edAnim
+// library [ENC]; these are an analytic stand-in [INF]. Goals are in the
+// skeleton model space; 'locals' is modified in place.
+//
+// Two-bone IK: rotates 'root' and 'mid' in the plane of the current bend so
+// that 'effector' reaches 'goal'. 'keepWorld' (or -1): bone whose model-space
+// rotation is restored after the solve (the hand / foot keeps the clip
+// orientation) [INF].
+void SolveTwoBoneIK( const EdenSkeleton &skeleton, std::vector<BoneTransform> &locals, int32_t root, int32_t mid,
+                     int32_t effector, const Vector3f &goal, int32_t keepWorld = -1 );
+// One-bone aim: rotates 'bone' so that 'effector' lies on the bone -> goal
+// line.
+void SolveAimIK( const EdenSkeleton &skeleton, std::vector<BoneTransform> &locals, int32_t bone, int32_t effector,
+                 const Vector3f &goal );
+
 // Per bone blend of two local poses (slerp / lerp).
 void BlendPoses( const std::vector<BoneTransform> &a, const std::vector<BoneTransform> &b, float weightB,
                  std::vector<BoneTransform> &out );

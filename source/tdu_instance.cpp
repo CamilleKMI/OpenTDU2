@@ -16,6 +16,7 @@
 #include "game/bootmenu/gm_login.h"
 #include "game/avatarchoice/gm_avatar_choice.h"
 #include "game/firstwalkmode/gm_first_walk_mode.h"
+#include "game/freeride/gm_freeride.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -252,6 +253,8 @@ std::unique_ptr<GameMode> TestDriveGameInstance::createGameMode( eGameMode mode 
         return std::make_unique<GMAvatarChoice>();
     case eGameMode::GM_FirstWalkMode:
         return std::make_unique<GMFirstWalkMode>();
+    case eGameMode::GM_FreeRide:
+        return std::make_unique<GMFreeRide>();
     default:
         OTDU_LOG_WARN( "Game mode '%s' is not implemented yet\n", GetGameModeName( mode ) );
         return nullptr;

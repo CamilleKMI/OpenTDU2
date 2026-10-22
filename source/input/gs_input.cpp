@@ -213,6 +213,12 @@ void GSInput::beginFrame() {
 
 void GSInput::processEvent( const SDL_Event &event, bool bUICapturesKeyboard, bool bUICapturesMouse ) {
     bUIHasKeyboard = bUICapturesKeyboard;
+    if ( event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ) {
+        lastDevice = eDevice::D_Keyboard;
+    } else if ( event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+                ( event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && std::abs( event.gaxis.value ) > 16384 ) ) {
+        lastDevice = eDevice::D_Pad;
+    }
     switch ( event.type ) {
     case SDL_EVENT_KEY_DOWN:
         if ( !bUICapturesKeyboard && !event.key.repeat ) {

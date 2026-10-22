@@ -183,6 +183,9 @@ void IntroCinematic::unload() {
     lights.clear();
     selectables.clear();
     goalTimer = -1.0f;
+    bPlayerSeated = false;
+    bDriverPose = false;
+    driverBank.unload();
     bCameraOverride = false;
     bLoaded = false;
 }
@@ -552,6 +555,225 @@ void IntroCinematic::showGoal( const std::string &text ) {
     goalTimer = 30.0f;
 }
 
+void IntroCinematic::showTutorial( const std::string &text ) {
+    // FUN_00d62ed0: FUN_00d62a90 sets /:TutText (the PC text _messpc_hc when
+    // given and the device is not the X360 pad, else _mess_hc), then the
+    // movie goes to "open_tuto" on /pop_tutorial (GENERAL.vmf sprite 647:
+    // open_tuto_WM when _root.IsWalkMode; /:IsWalkmode stays false here, it
+    // is only set for the "invi" message).
+    if ( !general.isLoaded() ) {
+        return;
+    }
+    general.setVariable( "/:TutText", text );
+    general.gotoLabel( "/pop_tutorial", "open_tuto", true );
+}
+
+void IntroCinematic::closeTutorial() {
+    // FUN_00d61600: pop_tutorial.close_popup().
+    if ( general.isLoaded() ) {
+        general.invoke( "/pop_tutorial", "close_popup", {} );
+    }
+}
+
+bool IntroCinematic::getCarWorld( Matrix4x4f &outWorld ) const {
+    return car.isLoaded() && computeCarWorld( outWorld );
+}
+
+bool IntroCinematic::getCarLocal( Matrix4x4f &outLocal ) const {
+    Matrix4x4f world;
+    if ( !getCarWorld( world ) ) {
+        return false;
+    }
+    outLocal = sceneOrigin.inverse() * world;
+    return true;
+}
+
+bool IntroCinematic::setPlayerSeated( bool bSeated ) {
+    bPlayerSeated = bSeated;
+    if ( !bSeated || bDriverPose ) {
+        return bDriverPose || !bSeated;
+    }
+    // Entity__AvatarPlayer DriverMan / DriverWoman (avatarsdriver.bnk):
+    // anim_blend_drive[0..6] = driveiklayer0..6.bas [DATA]. Layer 0 blends
+    // stance_turn.xan (weight 1) with turn.xan (weight 0, the steering);
+    // stance_turn.anm is the static wheel-straight pose (= turn.anm at
+    // mid-clip, plus a ROOT key (0, -0.019, 0.059)) [DATA]. Layers 1 / 3
+    // (stance.xan, empty), 2 (hand_size), 4 (hand_open, weight 0), 5 (gear
+    // clips, weight 0) add nothing at rest; layer 6 holds the IK nodes
+    // (updateSeatedPlayer) [DATA]. hand_size's sample time is not decoded:
+    // the fingers keep the stance_turn grip [INF].
+    const std::string path = gpFile->getBankFolder() + "scenarics/avatars/avatarsdriver.bnk";
+    if ( driverBank.getEntries().empty() && !driverBank.load( path.c_str() ) ) {
+        OTDU_LOG_WARN( "IntroCinematic: '%s' not found\n", path.c_str() );
+        return false;
+    }
+    const BankEntry *pStance = driverBank.findEntry( "stance_turn.anm" );
+    bDriverPose = pStance != nullptr && driverPose.parse( pStance->pData, pStance->Size );
+    bDriverIKLoaded = false;
+    return bDriverPose;
+}
+
+// Euro/Bnk/DataBase/IKOffsetDB.bin (FUN_00b97cc0 load, FUN_00b96ba0 parse
+// [CODE]; layout docs/re/driver_seat_spec.md). Big endian (the PC parser
+// byte-swaps when the magic reads "BDKI") [CODE + DATA]:
+//   +0x00 u16 2, u16 3, u32 0, u32 ?, "IKDB"
+//   +0x10 chunk "CAIK", u16 2 (sexes), u16 0, u32, u32
+//   +0x20 u32 numCars, then per car: u32 _id_car,
+//         2 x { f32 seat[5]; 27 x { f32 offset[3]; f32 unused[3] } },
+//         11 x f32[3]
+//   then chunk "BIIK" (bikes).
+// seat[] reads r1..r5 are stored at record +0x220, +0x228, +0x224, +0x230,
+// +0x22c: the driver seat group moves by (0, +0x224, +0x228) = (0, r3, r2)
+// (FUN_00b8ade0) [CODE]. Node offset = the first 3 floats (record entry
+// +0x20, the one FUN_00b7e940 reads) [CODE]. Sex index 1 = woman
+// (FUN_00cabec0() == 1) [INF: DBPNJ _sex 1 = woman].
+bool IntroCinematic::loadDriverIKOffsets( int32_t idCar, bool bWoman ) {
+    driverIK = DriverIKOffsets();
+    std::vector<uint8_t> file;
+    const std::string folder = gpFile->getBankFolder();
+    if ( !gpFile->loadFile( ( folder + "DataBase/IKOffsetDB.bin" ).c_str(), file ) &&
+         !gpFile->loadFile( ( folder + "database/ikoffsetdb.bin" ).c_str(), file ) ) {
+        return false;
+    }
+    auto u32 = [&]( size_t offset ) {
+        return static_cast<uint32_t>( file[offset] ) << 24 | static_cast<uint32_t>( file[offset + 1] ) << 16 |
+               static_cast<uint32_t>( file[offset + 2] ) << 8 | file[offset + 3];
+    };
+    auto f32 = [&]( size_t offset ) {
+        const uint32_t bits = u32( offset );
+        float value;
+        memcpy( &value, &bits, 4 );
+        return value;
+    };
+    constexpr size_t kSexSize = 5 * 4 + 27 * 24;
+    constexpr size_t kCarSize = 4 + 2 * kSexSize + 11 * 12;
+    if ( file.size() < 0x24 || memcmp( file.data() + 0x0c, "BDKI", 4 ) != 0 ||
+         memcmp( file.data() + 0x10, "KIAC", 4 ) != 0 ) {
+        return false;
+    }
+    const uint32_t numCars = u32( 0x20 );
+    for ( uint32_t c = 0; c < numCars && 0x24 + ( c + 1 ) * kCarSize <= file.size(); c++ ) {
+        const size_t car = 0x24 + c * kCarSize;
+        if ( static_cast<int32_t>( u32( car ) ) != idCar ) {
+            continue;
+        }
+        const size_t sex = car + 4 + ( bWoman ? kSexSize : 0 );
+        driverIK.SeatY = f32( sex + 8 );
+        driverIK.SeatZ = f32( sex + 4 );
+        for ( uint32_t n = 0; n < 27; n++ ) {
+            const size_t entry = sex + 20 + n * 24;
+            driverIK.Node[n] = Vector3f( f32( entry ), f32( entry + 4 ), f32( entry + 8 ) );
+        }
+        driverIK.bValid = true;
+        return true;
+    }
+    return false;
+}
+
+void IntroCinematic::updateSeatedPlayer() {
+    player.bVisible = false;
+    Matrix4x4f carWorld;
+    Matrix4x4f seat;
+    if ( !player.Avatar || !bDriverPose || !getCarWorld( carWorld ) ||
+         !car.getNodeModelTransform( "DVRSEAT_LR", seat ) ) {
+        return;
+    }
+    if ( !bDriverIKLoaded ) {
+        bDriverIKLoaded = true;
+        const int32_t idCar = car.getIdCar();
+        if ( !loadDriverIKOffsets( idCar, player.Avatar->isWoman() ) ) {
+            OTDU_LOG_WARN( "IntroCinematic: no IKOffsetDB record for car %d (offsets 0)\n", idCar );
+        }
+    }
+    const EdenSkeleton &skeleton = player.Avatar->getSkeleton();
+    std::vector<BoneTransform> locals( skeleton.getNumBones() );
+    for ( uint32_t b = 0; b < skeleton.getNumBones(); b++ ) {
+        locals[b] = skeleton.getBindLocal( b );
+    }
+    driverPose.sample( skeleton, 0.0f, false, locals );
+
+    // Avatar root (FUN_00b8ade0 / FUN_00b82450 [CODE]): car world with the
+    // translation car * (DvrSeat node position + R_DvrSeat * IKOffsetDB
+    // offset of DvrSeat), per car / per sex from IKOffsetDB.bin (0 when the
+    // car has no record, FUN_00b97cc0). The seat group SEAT_*_L is also
+    // moved by the stored (y, z) seat adjustment (+0x224 / +0x228 of the same
+    // record) [CODE].
+    // Seat group adjustment (0, y, z) moves DvrSeat and Back_L (children of
+    // Seat_HR_L) [CODE]; FUN_0042b4f0's add-vs-set is [ENC]: added, since
+    // the zero default must leave the seat in place [INF].
+    const Vector3f seatAdjust( 0.0f, driverIK.SeatY, driverIK.SeatZ );
+    seat = Matrix4x4f::Translation( seatAdjust + driverIK.Node[0] ) * seat; // + R_DvrSeat * offset (identity R)
+    const Matrix4x4f seatInverse = seat.inverse();
+
+    // IK goals (FUN_00b7e940 [CODE]): the car nodes Hand_*_L / Hand_*_R,
+    // Foot_*_R / Foot_*_L and Back_*_L (+ R_node * their IKOffsetDB offsets),
+    // weights 1 (+0x1df0 / +0x1df4 = 1.0 at seat-in, FUN_00b7fc74); chains of
+    // driveiklayer6.bas [DATA]. Car nodes are read on the exterior model
+    // (the _LR names; the interior _HR ones are at the same places [DATA]).
+    // Node index in the IKOffsetDB 27-entry table (0xf7dbf0 LR / 0xf7db68 HR).
+    auto goal = [&]( const char *pNode, int32_t index, Vector3f &out ) {
+        Matrix4x4f node;
+        if ( !car.getNodeModelTransform( pNode, node ) ) {
+            return false;
+        }
+        Vector3f position = node.getTranslation();
+        if ( index >= 0 ) {
+            position += node.transformVector( driverIK.Node[index] );
+        }
+        if ( index == 6 ) {
+            position += seatAdjust; // Back_L is in the seat group
+        }
+        out = seatInverse.transformPoint( position );
+        return true;
+    };
+    auto bone = [&]( const char *pName ) { return skeleton.findBone( EdenNameHash4( pName ) ); };
+    Vector3f target;
+    if ( goal( "BACK_LR_L", 6, target ) ) {
+        SolveAimIK( skeleton, locals, bone( "Spine" ), bone( "IK_Back" ), target );
+    }
+    if ( goal( "HAND_LR_R", 1, target ) ) {
+        SolveTwoBoneIK( skeleton, locals, bone( "Arm_R" ), bone( "ForeArm_R" ), bone( "IK_Right_Hand" ), target,
+                        bone( "Hand_R" ) );
+    }
+    if ( goal( "HAND_LR_L", 2, target ) ) {
+        SolveTwoBoneIK( skeleton, locals, bone( "Arm_L" ), bone( "ForeArm_L" ), bone( "IK_Left_Hand" ), target,
+                        bone( "Hand_L" ) );
+    }
+    if ( goal( "FOOT_LR_R", 3, target ) ) {
+        SolveTwoBoneIK( skeleton, locals, bone( "UpLeg_R" ), bone( "Leg_R" ), bone( "IK_Right_Foot" ), target,
+                        bone( "Foot_R" ) );
+    }
+    if ( goal( "FOOT_LR_L", 4, target ) ) {
+        SolveTwoBoneIK( skeleton, locals, bone( "UpLeg_L" ), bone( "Leg_L" ), bone( "IK_Left_Foot" ), target,
+                        bone( "Foot_L" ) );
+    }
+    skeleton.computeSkinMatrices( locals, player.WorldBones, player.Skin );
+    player.World = carWorld * seat;
+    player.bVisible = true;
+    static int32_t logSeat = CmdLine::HasArg( "-logseat" ) ? 1 : 0;
+    if ( logSeat > 0 ) {
+        logSeat--;
+        OTDU_LOG_INFO( "SEAT IKOffsetDB car %d valid %d seat (%.3f %.3f)\n", car.getIdCar(), driverIK.bValid ? 1 : 0,
+                       driverIK.SeatY, driverIK.SeatZ );
+        struct {
+            const char *pBone, *pNode;
+            int32_t Index;
+        } pairs[] = { { "IK_Left_Hand", "HAND_LR_L", 2 }, { "IK_Right_Hand", "HAND_LR_R", 1 },
+                      { "IK_Left_Foot", "FOOT_LR_L", 4 }, { "IK_Right_Foot", "FOOT_LR_R", 3 },
+                      { "IK_Back", "BACK_LR_L", 6 },      { "Head", "DVRSEAT_LR", -1 } };
+        for ( const auto &pair : pairs ) {
+            const int32_t b = bone( pair.pBone );
+            Vector3f t;
+            if ( b >= 0 && goal( pair.pNode, pair.Index, t ) ) {
+                const Vector3f p = player.WorldBones[b].getTranslation();
+                OTDU_LOG_INFO( "SEAT %-14s (%.3f %.3f %.3f) goal %s (%.3f %.3f %.3f) dist %.3f\n", pair.pBone, p.x,
+                               p.y, p.z, pair.pNode, t.x, t.y, t.z, ( p - t ).length() );
+            }
+        }
+    }
+    computeAvatarLighting( player.World.getTranslation(), player.Lighting );
+}
+
 void IntroCinematic::closeGoal() {
     // FUN_00d61700: pop_goal.close_popup().
     goalTimer = -1.0f;
@@ -818,7 +1040,13 @@ void IntroCinematic::drawSets( EdenRenderer &renderer, EdenSceneView::ePass pass
         }
     }
     if ( player.Avatar && player.bVisible ) {
-        player.Avatar->draw( renderer, player.World, player.Skin, &player.Lighting );
+        // Seated under the game camera (cockpit view, camera mode 23): the
+        // head and what is worn on it are not drawn (the eye is inside the
+        // head; the original seated view shows no head / hair) [INF: the
+        // cockpit render branch FUN_00b75130 -> FUN_00b940a0(DAT_00ffbfd4)
+        // was not decoded further].
+        const bool bDrawHead = !( bPlayerSeated && bCameraOverride );
+        player.Avatar->draw( renderer, player.World, player.Skin, &player.Lighting, bDrawHead );
     }
     Matrix4x4f carWorld;
     if ( car.isLoaded() && computeCarWorld( carWorld ) ) {
@@ -919,6 +1147,7 @@ void IntroCinematic::draw() {
     }
     if ( general.isLoaded() ) {
         general.drawClipOnly( gpRender->get2DRenderer(), "/pop_goal" );
+        general.drawClipOnly( gpRender->get2DRenderer(), "/pop_tutorial" );
     }
 }
 
@@ -1271,7 +1500,11 @@ void IntroCinematic::updatePnjs() {
     for ( Pnj &pnj : pnjs ) {
         update( pnj, nullptr );
     }
-    update( player, "Avatar" );
+    if ( bPlayerSeated ) {
+        updateSeatedPlayer();
+    } else {
+        update( player, "Avatar" );
+    }
 }
 
 void IntroCinematic::loadLights( const XmbDocument &entities ) {

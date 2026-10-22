@@ -1,0 +1,23 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+out/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.xcodeproj/
+*.swp
+
+# Game data is never committed (copyrighted, from your own TDU2 install)
+*.bnk
+*.big
+*.cpr
+*.ppm
+
+# Local archives and helper scripts
+*.tgz
+push_camille.sh
+.camille_token

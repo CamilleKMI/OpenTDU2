@@ -75,6 +75,10 @@ void CinematicCar::unload() {
     hardtopSkin.clear();
     cockpitLowNodes.clear();
     interiorDrawnNodes.clear();
+    for ( DoorNodes &door : doors ) {
+        door = DoorNodes();
+    }
+    doorAngle[0] = doorAngle[1] = 0.0f;
 }
 
 void CinematicCar::assignEnvironment( EdenRenderer &renderer, GPUTexture *pCube ) {
@@ -94,6 +98,7 @@ bool CinematicCar::load( const Desc &requested ) {
         OTDU_LOG_WARN( "CinematicCar: '%s' not available, using the California\n", desc.FileName.c_str() );
         desc = Desc();
     }
+    fileName = desc.FileName;
     const std::string carName = ToLower( desc.FileName );
     const std::string carPath = folder + "high/" + carName + ".bnk";
     const std::string commonPath = folder + "common_car.bnk";
@@ -272,6 +277,38 @@ bool CinematicCar::load( const Desc &requested ) {
         }
     }
 
+    // Doors (FUN_00c6a610): DOOR_L / DOOR_R (slots 29 / 30); their key
+    // nodes DOOR_x_A_1..4 (strings 0x00ef5d38 / 0x00ef5d2c, up to 3 channels
+    // A..C) do not exist in california.3dd [DATA], so the door is rotated
+    // about its own Y axis (FUN_00c67020 fallback). Rest transforms are taken
+    // after the window placement above.
+    for ( int32_t side = 0; side < 2; side++ ) {
+        DoorNodes &door = doors[side];
+        door = DoorNodes();
+        door.Door = scene.findNode( side == 0 ? "DOOR_L" : "DOOR_R" );
+        if ( door.Door < 0 ) {
+            continue;
+        }
+        door.DoorRest = car.getNodeTransform( door.Door );
+        for ( size_t i = 0; i < nodes.size(); i++ ) {
+            const int32_t node = static_cast<int32_t>( i );
+            if ( node == door.Door || scene.isDescendantOf( node, door.Door ) ) {
+                door.CarRest.emplace_back( node, car.getNodeTransform( node ) );
+            }
+        }
+        if ( interior.isLoaded() ) {
+            const Render3DD &interiorScene = interior.getScene();
+            const int32_t panel = interiorScene.findNode( side == 0 ? "INT_HR_L" : "INT_HR_R" );
+            for ( size_t i = 0; panel >= 0 && i < interiorScene.getNodes().size(); i++ ) {
+                const int32_t node = static_cast<int32_t>( i );
+                if ( node == panel || interiorScene.isDescendantOf( node, panel ) ) {
+                    door.InteriorRest.emplace_back( node, interior.getNodeTransform( node ) );
+                }
+            }
+        }
+    }
+    doorAngle[0] = doorAngle[1] = 0.0f;
+
     // Wheels: rim at D_RIM_xx, tire at the next node (?_TIRE_xx). Tire mesh
     // of the rim diameter (19" for the California: T_19P).
     wheelNodes.clear();
@@ -386,6 +423,64 @@ bool CinematicCar::load( const Desc &requested ) {
         }
     }
     return true;
+}
+
+void CinematicCar::setDoorAngle( int32_t side, float angle ) {
+    DoorNodes &door = doors[side & 1];
+    doorAngle[side & 1] = angle;
+    if ( door.Door < 0 ) {
+        return;
+    }
+    // FUN_00ddbcd0(angle): rotation about the node Y axis (matrix entries
+    // [0][0], [0][2], [2][0], [2][2]; the sin / cos helpers are encrypted
+    // [ENC]); applied to the door node frame [INF: post-multiplied local]. A
+    // negative angle swings the left door outwards (+X is the car's left).
+    const Matrix4x4f rotation = Matrix4x4f::FromQuaternion(
+        Quaternionf::FromAxisAngle( Vector3f( 0.0f, 1.0f, 0.0f ), angle ) );
+    const Matrix4x4f delta = door.DoorRest * rotation * door.DoorRest.inverse();
+    for ( const auto &rest : door.CarRest ) {
+        car.setNodeTransform( rest.first, delta * rest.second );
+    }
+    for ( const auto &rest : door.InteriorRest ) {
+        interior.setNodeTransform( rest.first, delta * rest.second );
+    }
+}
+
+int32_t CinematicCar::getIdCar() const {
+    if ( gpDatabase == nullptr || fileName.empty() ) {
+        return -1;
+    }
+    XmbValue root = gpDatabase->getDocument().getRoot();
+    for ( uint32_t i = 0; i < root.getArraySize( "DBCarPhysicsData" ); i++ ) {
+        XmbValue record = root.getArrayElement( "DBCarPhysicsData", i );
+        if ( StringCmpI( record["_car_file_name"].asString().c_str(), fileName.c_str() ) == 0 ) {
+            return static_cast<int32_t>( record["_id_car"].asInt( -1 ) );
+        }
+    }
+    return -1;
+}
+
+bool CinematicCar::getNodeModelTransform( const char *pName, Matrix4x4f &outTransform ) const {
+    if ( !car.isLoaded() ) {
+        return false;
+    }
+    int32_t node = car.getScene().findNode( pName );
+    if ( node < 0 ) {
+        node = FindNodeByHash( car.getScene(), pName );
+    }
+    if ( node < 0 ) {
+        return false;
+    }
+    outTransform = car.getNodeTransform( node );
+    return true;
+}
+
+bool CinematicCar::getBodyBounds( Vector3f &outMin, Vector3f &outMax ) const {
+    if ( !car.isLoaded() ) {
+        return false;
+    }
+    const int32_t body = car.getScene().findNode( "BODY_HR" );
+    return body >= 0 && car.getNodeBounds( body, outMin, outMax );
 }
 
 Matrix4x4f CinematicCar::fitOnGround( Vector3f position, const Quaternionf &rotation,

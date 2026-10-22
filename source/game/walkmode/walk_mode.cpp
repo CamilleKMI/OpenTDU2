@@ -123,6 +123,9 @@ void WalkMode::updateSelection( IntroCinematic &scene, float deltaTime ) {
     float bestDistance = kReticleRayLength;
     for ( size_t i = 0; i < selectables.size(); i++ ) {
         float t = 0.0f;
+        if ( selectableFilter && !selectableFilter( static_cast<int32_t>( i ) ) ) {
+            continue;
+        }
         if ( selectables[i].raycast( origin, direction, kReticleRayLength, t ) && t < bestDistance ) {
             best = static_cast<int32_t>( i );
             bestDistance = t;
