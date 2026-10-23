@@ -1,0 +1,1 @@
+# OpenTDU2 has no git submodules: third-party libraries are fetched by CMake (cmake/Dependencies.cmake); third_party/dxvk is a vendored, modified DXVK subset.

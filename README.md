@@ -1,7 +1,7 @@
 # OpenTDU2
 
-![macOS](https://img.shields.io/badge/macOS-passing-brightgreen?logo=apple)
-![Linux](https://img.shields.io/badge/Linux-passing-brightgreen?logo=linux)
+[![macOS](https://github.com/CamilleKMI/OpenTDU2/actions/workflows/macos.yml/badge.svg)](https://github.com/CamilleKMI/OpenTDU2/actions/workflows/macos.yml)
+[![Linux](https://github.com/CamilleKMI/OpenTDU2/actions/workflows/linux.yml/badge.svg)](https://github.com/CamilleKMI/OpenTDU2/actions/workflows/linux.yml)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
 ![Vulkan](https://img.shields.io/badge/Vulkan-MoltenVK-red)
 
