@@ -5,10 +5,12 @@
 
 #include <cfloat>
 
+#include "filesystem/gs_file.h"
 #include "render/gs_render.h"
 #include "render/texture_cache.h"
 #include "system/cmd_line.h"
 #include "core/xmb.h"
+#include "core/crypto/cpr.h"
 #include "render/eden/eden_weather.h"
 
 namespace {
@@ -39,9 +41,12 @@ bool EdenWorld::initialize( EdenRenderer &renderer, const char *pIsland ) {
     destroy();
     pRenderer = &renderer;
     islandFolder = "Euro/Bnk/islands/" + std::string( pIsland ) + "/level/";
-    if ( StringCmpI( pIsland, "hawai" ) == 0 ) {
-        areaColumns = 8;
-        areaRows = 8;
+    if ( !loadWorldConfig( pIsland ) ) {
+        // Ibiza values (its worldconfig.cpr) [DATA].
+        areaColumns = 7;
+        areaRows = 6;
+        OTDU_LOG_WARN( "EdenWorld: %sworldconfig.cpr not readable, %d x %d areas\n", islandFolder.c_str(), areaColumns,
+                       areaRows );
     }
 
     // Shared heightfield grid: TEXCOORD0 = (x, z) grid coordinates (the
@@ -101,6 +106,19 @@ bool EdenWorld::initialize( EdenRenderer &renderer, const char *pIsland ) {
         islandOcean.load( renderer, islandBank, ( std::string( pIsland ) + "-o" ).c_str(), &libraryMaterials,
                           islandPath.c_str() );
         pIslandColorMap = gpRender->getTextureCache().find( islandPath.c_str(), ( std::string( pIsland ) + "-c" ).c_str() );
+        // Island level heightfield (<island>.3dd HMAP: 16 x 16 patches, 384 m
+        // spacing [DATA]); the TD_HeightMap island permutation (S_USERTYPE4
+        // = 2) scales the grid by 384 m [SHADER].
+        if ( loadHeightfield( islandBank, pIsland, islandPath.c_str(), islandTerrain ) ) {
+            islandTerrain.Spacing = 384.0f;
+            islandTerrain.Materials[0].HeightfieldGrid = 2;
+            renderer.updateProgram( islandTerrain.Materials[0] );
+            if ( islandTerrain.Materials[0].pProgram == nullptr ) {
+                OTDU_LOG_WARN( "EdenWorld: no island permutation of TD_HeightMap for '%s'\n", pIsland );
+                islandTerrain.Materials.clear();
+            }
+        }
+        bIslandIndicesDirty = true;
     }
 
     // Wet ground textures.
@@ -142,6 +160,49 @@ bool EdenWorld::initialize( EdenRenderer &renderer, const char *pIsland ) {
         OTDU_LOG_WARN( "EdenWorld: '%s' not found (no road signs)\n", actorPath.c_str() );
     }
     return pGridBuffer != nullptr && pGridIndices != nullptr;
+}
+
+bool EdenWorld::loadWorldConfig( const char *pIsland ) {
+    // <island>/level/worldconfig.cpr: encrypted XML, <Area NbColumns="7"
+    // NbRows= "6"/> (Ibiza 7 x 6, Hawai and Casino 11 x 9) [DATA].
+    std::string text;
+    if ( !LoadCPRText( ( islandFolder + "worldconfig.cpr" ).c_str(), text ) ) {
+        return false;
+    }
+    auto readAttribute = [&text]( const char *pName, int32_t &outValue ) {
+        size_t position = text.find( pName );
+        if ( position == std::string::npos ) {
+            return false;
+        }
+        position = text.find( '"', position );
+        if ( position == std::string::npos ) {
+            return false;
+        }
+        outValue = atoi( text.c_str() + position + 1 );
+        return outValue > 0;
+    };
+    int32_t columns = 0, rows = 0;
+    if ( !readAttribute( "NbColumns", columns ) || !readAttribute( "NbRows", rows ) ) {
+        return false;
+    }
+    areaColumns = columns;
+    areaRows = rows;
+    OTDU_LOG_INFO( "EdenWorld: %s: %d x %d areas (worldconfig.cpr)\n", pIsland, areaColumns, areaRows );
+    return true;
+}
+
+std::string EdenWorld::getSectorBankPath( const SectorId &id ) const {
+    char path[256];
+    snprintf( path, sizeof( path ), "%sarea-%d/area-%d-%d/%s.bnk", islandFolder.c_str(), id.AreaX, id.AreaX, id.AreaY,
+              SectorName( id ).c_str() );
+    return path;
+}
+
+std::string EdenWorld::GetSectorBankPath( const char *pIsland, const SectorId &id ) {
+    char path[256];
+    snprintf( path, sizeof( path ), "Euro/Bnk/islands/%s/level/area-%d/area-%d-%d/%s.bnk", pIsland, id.AreaX, id.AreaX,
+              id.AreaY, SectorName( id ).c_str() );
+    return path;
 }
 
 int32_t EdenWorld::getActorModel( uint64_t hashcode ) {
@@ -310,6 +371,12 @@ void EdenWorld::destroy() {
     }
     actorBank.unload();
     islandOcean.destroy();
+    device.destroyBuffer( islandTerrain.pBuffer );
+    device.destroyBuffer( pIslandIndexBuffer );
+    islandTerrain = Heightfield();
+    pIslandIndexBuffer = nullptr;
+    numIslandIndices = 0;
+    bIslandIndicesDirty = true;
     if ( islandBank.isLoaded() ) {
         gpRender->getTextureCache().releaseOwner( islandBank.getPath().c_str() );
     }
@@ -330,7 +397,7 @@ void EdenWorld::destroy() {
     commonBank.unload();
 }
 
-EdenWorld::SectorId EdenWorld::getSectorAt( const Vector3f &position ) const {
+EdenWorld::SectorId EdenWorld::getSectorAt( const Vector3f &position ) {
     SectorId id;
     const int32_t row = static_cast<int32_t>( std::floor( position.z / kSectorSize ) );
     const float offset = ( row & 1 ) ? kSectorSize * 0.5f : 0.0f;
@@ -342,7 +409,7 @@ EdenWorld::SectorId EdenWorld::getSectorAt( const Vector3f &position ) const {
     return id;
 }
 
-Vector3f EdenWorld::getSectorOrigin( const SectorId &id ) const {
+Vector3f EdenWorld::getSectorOrigin( const SectorId &id ) {
     const float x = ( id.AreaX * static_cast<float>( kSectorsPerArea ) + id.X ) * kSectorSize +
                     ( ( id.Y & 1 ) ? kSectorSize * 0.5f : 0.0f );
     const float z = ( id.AreaY * static_cast<float>( kSectorsPerArea ) + id.Y ) * kSectorSize;
@@ -462,11 +529,15 @@ bool EdenWorld::loadSector( const SectorId &id ) {
     auto pSector = std::make_unique<Sector>();
     pSector->Id = id;
     pSector->Origin = getSectorOrigin( id );
-    char path[256];
-    snprintf( path, sizeof( path ), "%sarea-%d/area-%d-%d/%s.bnk", islandFolder.c_str(), id.AreaX, id.AreaX,
-              id.AreaY, SectorName( id ).c_str() );
-    pSector->BankPath = path;
+    const std::string bankPath = getSectorBankPath( id );
+    const char *path = bankPath.c_str();
+    pSector->BankPath = bankPath;
+    if ( !gpFile->fileExists( path ) ) {
+        OTDU_LOG_WARN( "EdenWorld: '%s' not found, sector skipped\n", path );
+        return false;
+    }
     if ( !pSector->SectorBank.load( path ) ) {
+        OTDU_LOG_WARN( "EdenWorld: '%s' could not be loaded, skipped\n", path );
         return false;
     }
     gpRender->getTextureCache().loadBankTextures( pSector->SectorBank, path );
@@ -517,9 +588,7 @@ bool EdenWorld::loadSector( const SectorId &id ) {
                     pSector->Objects.getBoundsMax().x, pSector->Objects.getBoundsMax().y,
                     pSector->Objects.getBoundsMax().z );
     sectors.push_back( std::move( pSector ) );
-    for ( auto &pArea : areas ) {
-        pArea->bIndicesDirty = true;
-    }
+    markAreasDirty( id );
     bOceanVisibilityDirty = true;
     return true;
 }
@@ -532,6 +601,9 @@ bool EdenWorld::loadArea( int32_t x, int32_t y ) {
     char path[256];
     snprintf( path, sizeof( path ), "%sarea-%d/area-%d-%d/area-%d-%d.bnk", islandFolder.c_str(), x, x, y, x, y );
     pArea->BankPath = path;
+    if ( !gpFile->fileExists( path ) ) {
+        return false; // open sea or data not installed (counted by loadAround)
+    }
     if ( !pArea->AreaBank.load( path ) ) {
         return false;
     }
@@ -543,7 +615,85 @@ bool EdenWorld::loadArea( int32_t x, int32_t y ) {
     pArea->Objects.load( *pRenderer, pArea->AreaBank, ( std::string( name ) + "-o" ).c_str(), &libraryMaterials, path );
     pArea->Objects.bindUVAnimations( pArea->AreaBank );
     areas.push_back( std::move( pArea ) );
+    bIslandIndicesDirty = true;
     return true;
+}
+
+void EdenWorld::markAreasDirty( const SectorId &id ) {
+    // A sector of an odd row overlaps the next area by half a sector.
+    for ( auto &pArea : areas ) {
+        if ( pArea->Y == id.AreaY && ( pArea->X == id.AreaX || pArea->X == id.AreaX + 1 ) ) {
+            pArea->bIndicesDirty = true;
+        }
+    }
+}
+
+uint32_t EdenWorld::unloadFar( const Vector3f &position, int32_t sectorRadius ) {
+    const SectorId center = getSectorAt( position );
+    const int32_t centerColumn = center.AreaX * kSectorsPerArea + center.X;
+    const int32_t centerRow = center.AreaY * kSectorsPerArea + center.Y;
+    uint32_t numUnloaded = 0;
+    RenderDevice &device = gpRender->getDevice();
+    for ( auto it = sectors.begin(); it != sectors.end(); ) {
+        const SectorId &id = ( *it )->Id;
+        const int32_t column = id.AreaX * kSectorsPerArea + id.X;
+        const int32_t row = id.AreaY * kSectorsPerArea + id.Y;
+        if ( std::abs( column - centerColumn ) <= sectorRadius && std::abs( row - centerRow ) <= sectorRadius ) {
+            ++it;
+            continue;
+        }
+        const SectorId unloadedId = id;
+        device.destroyBuffer( ( *it )->Terrain.pBuffer );
+        gpRender->getTextureCache().releaseOwner( ( *it )->BankPath.c_str() );
+        it = sectors.erase( it );
+        markAreasDirty( unloadedId );
+        numUnloaded++;
+    }
+    if ( numUnloaded != 0 ) {
+        bOceanVisibilityDirty = true;
+        OTDU_LOG_INFO( "EdenWorld: %u sectors unloaded, %zu loaded\n", numUnloaded, sectors.size() );
+    }
+    return numUnloaded;
+}
+
+void EdenWorld::updateIslandIndices() {
+    // Island quads (384 m, 16 per area) not covered by a loaded area
+    // heightfield [INF: the level LOD selection is encrypted].
+    bIslandIndicesDirty = false;
+    gpRender->getDevice().destroyBuffer( pIslandIndexBuffer );
+    pIslandIndexBuffer = nullptr;
+    numIslandIndices = 0;
+    const uint32_t quadsPerArea = static_cast<uint32_t>( kSectorsPerArea * kSectorSize / 384.0f );
+    std::vector<uint8_t> covered( kGridQuads * kGridQuads, 0 );
+    for ( const auto &pArea : areas ) {
+        if ( pArea->Terrain.Materials.empty() || pArea->X < 0 || pArea->Y < 0 ) {
+            continue;
+        }
+        for ( uint32_t z = pArea->Y * quadsPerArea; z < ( pArea->Y + 1 ) * quadsPerArea && z < kGridQuads; z++ ) {
+            for ( uint32_t x = pArea->X * quadsPerArea; x < ( pArea->X + 1 ) * quadsPerArea && x < kGridQuads; x++ ) {
+                covered[z * kGridQuads + x] = 1;
+            }
+        }
+    }
+    std::vector<uint32_t> indices;
+    for ( uint32_t z = 0; z < kGridQuads; z++ ) {
+        for ( uint32_t x = 0; x < kGridQuads; x++ ) {
+            if ( covered[z * kGridQuads + x] ) {
+                continue;
+            }
+            const uint32_t i0 = z * kHeightfieldSize + x;
+            const uint32_t i1 = i0 + 1;
+            const uint32_t i2 = i0 + kHeightfieldSize;
+            const uint32_t i3 = i2 + 1;
+            indices.insert( indices.end(), { i0, i2, i1, i1, i2, i3 } );
+        }
+    }
+    if ( indices.empty() ) {
+        return;
+    }
+    pIslandIndexBuffer = gpRender->getDevice().createBuffer( indices.size() * sizeof( uint32_t ),
+                                                             VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data() );
+    numIslandIndices = static_cast<uint32_t>( indices.size() );
 }
 
 void EdenWorld::loadAround( const Vector3f &position, int32_t sectorRadius ) {
@@ -553,7 +703,8 @@ void EdenWorld::loadAround( const Vector3f &position, int32_t sectorRadius ) {
                 loadArea( x, y );
             }
         }
-        OTDU_LOG_INFO( "EdenWorld: %zu areas loaded\n", areas.size() );
+        OTDU_LOG_INFO( "EdenWorld: %zu areas loaded (%d x %d grid, the others have no bank)\n", areas.size(),
+                       areaColumns, areaRows );
     }
     const SectorId center = getSectorAt( position );
     bool bLoadedAny = false;
@@ -625,6 +776,17 @@ void EdenWorld::draw( EdenRenderer &renderer, const Vector3f &cameraPosition ) {
     }
     if ( islandOcean.isLoaded() && !bNoObjects && bOceanVisible ) {
         islandOcean.draw( renderer, Matrix4x4f::Identity() );
+    }
+    if ( bIslandTerrainEnabled && !islandTerrain.Materials.empty() && !bNoAreas ) {
+        if ( bIslandIndicesDirty ) {
+            updateIslandIndices();
+        }
+        if ( numIslandIndices > 0 ) {
+            EdenMesh mesh = islandTerrain.Mesh;
+            mesh.pIndexBuffer = pIslandIndexBuffer;
+            mesh.IndexCount = numIslandIndices;
+            renderer.draw( mesh, islandTerrain.Materials[0], Matrix4x4f::Identity() );
+        }
     }
     for ( auto &pArea : areas ) {
         if ( bNoAreas ) {

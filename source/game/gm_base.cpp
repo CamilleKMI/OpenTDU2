@@ -4,6 +4,7 @@
 namespace {
 constexpr const char *kGameModeNames[] = {
     "NONE", "LOGIN", "VIDEOBUMPER", "AVATAR_CHOICE", "FREERIDE", "CARSHOWCASE", "CINVIEWER", "TESTCAR", "FIRST_WM",
+    "WORLD_VIEWER",
 };
 static_assert( sizeof( kGameModeNames ) / sizeof( kGameModeNames[0] ) ==
                    static_cast<size_t>( eGameMode::GM_Count ),

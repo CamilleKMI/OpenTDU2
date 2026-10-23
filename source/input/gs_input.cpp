@@ -199,6 +199,37 @@ bool GSInput::wasKeyPressed( int32_t scancode ) const {
     return std::find( frameKeyPresses.begin(), frameKeyPresses.end(), scancode ) != frameKeyPresses.end();
 }
 
+bool GSInput::isKeyDown( int32_t scancode ) const {
+    if ( std::find( injectedKeyHolds.begin(), injectedKeyHolds.end(), scancode ) != injectedKeyHolds.end() ) {
+        return true;
+    }
+    if ( bUIHasKeyboard || scancode <= 0 || scancode >= SDL_SCANCODE_COUNT ) {
+        return false;
+    }
+    const bool *pKeys = SDL_GetKeyboardState( nullptr );
+    return pKeys != nullptr && pKeys[scancode];
+}
+
+void GSInput::setInjectedKeyHold( int32_t scancode, bool bHold ) {
+    auto it = std::find( injectedKeyHolds.begin(), injectedKeyHolds.end(), scancode );
+    if ( bHold && it == injectedKeyHolds.end() ) {
+        injectedKeyHolds.push_back( scancode );
+    } else if ( !bHold && it != injectedKeyHolds.end() ) {
+        injectedKeyHolds.erase( it );
+    }
+}
+
+void GSInput::setInjectedMouseButton( int32_t button, bool bHold ) {
+    if ( button <= 0 || button > 31 ) {
+        return;
+    }
+    if ( bHold ) {
+        injectedMouseButtons |= SDL_BUTTON_MASK( button );
+    } else {
+        injectedMouseButtons &= ~SDL_BUTTON_MASK( button );
+    }
+}
+
 void GSInput::beginFrame() {
     previousState = currentState;
     framePresses.clear();
@@ -209,6 +240,7 @@ void GSInput::beginFrame() {
     bStartReleased = false;
     mouseDeltaX = 0.0f;
     mouseDeltaY = 0.0f;
+    mouseWheel = 0.0f;
 }
 
 void GSInput::processEvent( const SDL_Event &event, bool bUICapturesKeyboard, bool bUICapturesMouse ) {
@@ -266,6 +298,11 @@ void GSInput::processEvent( const SDL_Event &event, bool bUICapturesKeyboard, bo
                 mouseDeltaX += event.motion.xrel * ( density > 0.0f ? density : 1.0f );
                 mouseDeltaY += event.motion.yrel * ( density > 0.0f ? density : 1.0f );
             }
+        }
+        break;
+    case SDL_EVENT_MOUSE_WHEEL:
+        if ( !bUICapturesMouse ) {
+            mouseWheel += event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
         }
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -333,7 +370,7 @@ void GSInput::processEvent( const SDL_Event &event, bool bUICapturesKeyboard, bo
 }
 
 bool GSInput::isMouseButtonDown( int32_t button ) const {
-    return ( SDL_GetMouseState( nullptr, nullptr ) & SDL_BUTTON_MASK( button ) ) != 0;
+    return ( ( SDL_GetMouseState( nullptr, nullptr ) | injectedMouseButtons ) & SDL_BUTTON_MASK( button ) ) != 0;
 }
 
 void GSInput::updateGamepad() {
@@ -387,9 +424,13 @@ void GSInput::tick( float deltaTime ) {
         bStartReleased |= action == eInputAction::IA_MenuValidate;
     }
     injectedPresses.clear();
+    frameKeyPresses.insert( frameKeyPresses.end(), injectedKeyPresses.begin(), injectedKeyPresses.end() );
+    injectedKeyPresses.clear();
     mouseDeltaX += injectedMouseX;
     mouseDeltaY += injectedMouseY;
     injectedMouseX = injectedMouseY = 0.0f;
+    mouseWheel += injectedWheel;
+    injectedWheel = 0.0f;
     updateGamepad();
 }
 

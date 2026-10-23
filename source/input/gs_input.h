@@ -85,6 +85,10 @@ public:
     bool wasStartReleased() const { return bStartReleased; }
     // Raw key press this frame (SDL scancode, debug keys not in the key maps).
     bool wasKeyPressed( int32_t scancode ) const;
+    // Raw key held (SDL scancode; false while the UI has the keyboard).
+    bool isKeyDown( int32_t scancode ) const;
+    // Mouse wheel motion this frame (notches, up > 0; 0 over the UI).
+    float getMouseWheel() const { return mouseWheel; }
 
     // Device of the last user input (keyboard/mouse or pad). The game itself
     // uses the controller selected in the options instead: profile +0x45
@@ -96,8 +100,14 @@ public:
 
     // Scripted input injection (automated tests).
     void injectPress( eInputAction action ) { injectedPresses.push_back( action ); }
+    // Raw key press next tick (wasKeyPressed), SDL scancode.
+    void injectKeyPress( int32_t scancode ) { injectedKeyPresses.push_back( scancode ); }
     void injectMouseDelta( float dx, float dy ) { injectedMouseX += dx; injectedMouseY += dy; }
     void setInjectedHold( eInputAction action, bool bHold ) { injectedHolds[static_cast<uint32_t>( action )] = bHold; }
+    // Raw key / mouse button held (SDL scancode / SDL_BUTTON_*), wheel notches.
+    void setInjectedKeyHold( int32_t scancode, bool bHold );
+    void setInjectedMouseButton( int32_t button, bool bHold );
+    void injectMouseWheel( float notches ) { injectedWheel += notches; }
 
 private:
     struct ActionBinding {
@@ -112,6 +122,7 @@ private:
     std::vector<eInputAction> injectedPresses;
     std::vector<eInputAction> framePresses;
     std::vector<int32_t> frameKeyPresses;
+    std::vector<int32_t> injectedKeyPresses;
     SDL_Gamepad *pGamepad;
     std::string textInput;
     bool bTextInputActive;
@@ -124,6 +135,10 @@ private:
     float injectedMouseY = 0.0f;
     float mouseDeltaX = 0.0f;
     float mouseDeltaY = 0.0f;
+    float mouseWheel = 0.0f;
+    float injectedWheel = 0.0f;
+    std::vector<int32_t> injectedKeyHolds;
+    uint32_t injectedMouseButtons = 0;
     float leftStick[2] = { 0.0f, 0.0f };
     float rightStick[2] = { 0.0f, 0.0f };
     bool bStartReleased = false;

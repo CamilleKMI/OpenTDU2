@@ -73,6 +73,7 @@ public:
         uint16_t ClipDepth = 0;
         std::string Name;
         bool bVisible = true;
+        bool bScripted = false;      // created by attachMovie (kept by timeline seeks)
         std::unique_ptr<Clip> pClip; // sprite instances
     };
 
@@ -166,6 +167,8 @@ private:
     void applyControlTags( Clip &clip, uint32_t frame, bool bQueueActions, bool bQueueChildActions = false );
     void placeObject( Clip &clip, const FlashPlaceInfo &place, bool bQueueActions );
     void removeObject( Clip &clip, uint16_t depth );
+    static constexpr int32_t kScriptDepthBase = 0x4000;
+    Value attachMovie( Clip &clip, const std::string &linkage, const std::string &name, int32_t depth );
     void initClip( Instance &instance, Clip *pParent, bool bQueueActions );
     void registerTextBitmap( const Instance &instance );
     void runPendingActions();

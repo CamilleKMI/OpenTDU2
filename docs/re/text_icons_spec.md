@@ -111,3 +111,23 @@ Default_KB.xmb has DevType = DevSubType = 0 for all 76 entries. With the keyboar
 - [INF] It is a convenience. The original uses the configured controller (§3).
 
 **Not changed:** `ResolveCommand` in gm_first_walk_mode.cpp (another engineer's file). It still emits the keyboard form, which is correct for Default_KB. With a pad key map, it should emit `FlashPlayer::PadChannelMarkup(entry.ChannelName)` when DevSubType == 3.
+
+## 7. OpenTDU2 user binding: main-row 4 for ACCESSORIES_LEFT (not game data)
+
+User request (Mac keyboard without numpad): the door action ACCESSORIES_LEFT (Default_KB `PAD_4`,
+"4 (PAVE NUM.)") also answers the **main-row 4** key. This is an OpenTDU2 binding, not from the game files.
+
+- `kUserBindings` in `gm_first_walk_mode.cpp`: `{ACCESSORIES_LEFT, ChannelName "4", ChannelLocName "4"}`, put
+  before the Default_KB entries of the action. The resolver takes the first entry (§1), so the tip reads
+  **`[4]`**; numpad 4 (`PAD_4`) still opens the door.
+- Names as the game writes them for that key [DATA]:
+  - Channel-name table in `.data` at **0x00f73b08**: 32-byte names indexed by DirectInput key code (0 "Unamed",
+    1 "ESC", **2..0xb "1".."0"**, 0x10 "A", 0x11 "Z" (AZERTY), …, 0x4b "PAD_4", …, 0x52 "PAD_0"). DIK_4 = 5 → "4".
+    No readable code references the table [INF: used by encrypted code].
+  - Default_KB: RADIO_CHANNEL / RADIO_VOL_LESS / RADIO_VOL_MORE = channels "1" / "2" / "3" with ChannelLocName
+    "1" / "2" / "3". The ChannelLocName strings are not in the loc database (they look like the French Windows key
+    names: "PAVE NUM.", "RET.ARR", "PG.PREC") [INF].
+  - No Default_KB action uses the main-row "4".
+- SDL scancodes are key positions (like DIK codes): `SDL_SCANCODE_4` is the main-row 4 key whatever the layout.
+- Test aid: autoplay `key=<SDL scancode name>` (e.g. `key=4`, `key=Keypad 4`) injects a raw key press.
+

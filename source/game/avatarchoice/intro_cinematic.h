@@ -3,6 +3,7 @@
 #include "filesystem/bank.h"
 #include "flash/flash_player.h"
 #include "game/avatar/eden_avatar.h"
+#include "game/avatar/facefx.h"
 #include "render/eden/eden_animation.h"
 #include "game/cinematic/cinematic_audio.h"
 #include "game/cinematic/cinematic_car.h"
@@ -32,8 +33,9 @@ public:
         Vector3f toUnit( const Vector3f &p ) const;
         Vector3f toUnitDirection( const Vector3f &d ) const;
         bool contains( const Vector3f &p ) const;
-        // Ray hit with the unit box (OfType 2) / sphere (1): distance.
-        bool raycast( const Vector3f &origin, const Vector3f &direction, float maxDistance, float &outT ) const;
+        // Ray hit with the unit box (OfType 2): entry distance (and exit).
+        bool raycast( const Vector3f &origin, const Vector3f &direction, float maxDistance, float &outT,
+                      float *pOutExit = nullptr ) const;
     };
 
     // Listener events (FUN_00da8040).
@@ -124,6 +126,14 @@ public:
     // Overrides the camera (walk mode); nullptr: cinematic camera.
     void setCameraOverride( const EdenSceneView::Camera *pCamera );
     inline const EdenSceneView::Camera &getCamera() const { return camera; }
+    // Look-at request of a PNJ (docs/re/facefx_spec.md 6.3): FUN_00b858f0
+    // (avatar +0x1d70 = target, +0x1d81 = 1, +0x1d68 = 0), the call of the
+    // lkon message and of the walk-mode state machine (0x9520b9, the player
+    // avatar in the self-view camera, 6.3.3); stopLookAt = lkof (+0x1d68 = 1).
+    // The target stays until the next request / lkof; FUN_00b89730 applies it
+    // while it is inside the 0.2 cone. False if no PNJ has that name.
+    bool setLookAtTarget( const std::string &pnjName, const Vector3f &worldTarget );
+    bool stopLookAt( const std::string &pnjName );
     // Entity__Fx emitter (S_TimeStart...).
     bool playEmitter( const char *pName );
     // Stops the 4 S_WALKMODE_Music emitters (C_INTRO start, event 0).
@@ -170,6 +180,15 @@ private:
         std::vector<Matrix4x4f> WorldBones;
         std::vector<Matrix4x4f> Skin;
         EdenAvatarLighting Lighting;
+        bool bFaceFxUsed = false; // facialAnimCoef written once (FUN_00b77b20)
+        // Look-at (docs/re/facefx_spec.md 6): lkon / lkof message state
+        // (avatar +0x1d70 target, +0x1d81 on, +0x1d68 lkof) and the FaceFX
+        // registers LookAt_T2_side / LookAt_T2_vertical of this frame.
+        const void *pLookMessageKey = nullptr; // last lkon / lkof key seen
+        bool bLookOn = false;
+        Vector3f LookTarget;
+        bool bLookAt = false;
+        float LookAt[2] = {};
     };
     // Entity__Light of the scene (FUN_00a4c7a0 light entry), world space.
     struct Light {
@@ -204,6 +223,7 @@ private:
     std::vector<EdenModel *> reflectSets; // Entity__Actor__Mesh D_REFLECT
     std::vector<Prop> props;
     EdenAvatarLibrary avatarLibrary;
+    FaceFxLibrary faceFx; // avatar_face_fx.bnk actors + the .fxe of the bank
     std::vector<Pnj> pnjs;
     Pnj player;
     std::unordered_map<std::string, std::pair<Vector3f, Quaternionf>> entityCameras; // Entity__Camera orient_pos_scale
@@ -215,6 +235,9 @@ private:
     uint64_t carEntityHashcode = 0;
     std::unordered_map<std::string, uint64_t> cinCarHashcodes;
     bool bCarEnvironment = false;
+    // Static car cube of the scene bank (CUBECAR, garage.bnk): FUN_009aa2c0
+    // -> FUN_00a4baf0; the dynamic cube is then not used.
+    bool bCarStaticCube = false;
     std::vector<Light> lights;
     Vector3f cameraForward = Vector3f( 0.0f, 0.0f, 1.0f );
     std::vector<Volume> volumes;
@@ -272,6 +295,14 @@ private:
     void animatePnj( Pnj &pnj, const Playing &playing, const CinematicScene &scene,
                      const CinematicScene::Object &object, float sceneTime );
     void updatePnjs();
+    // .sce actor track "Morph": FaceFX animation of the facial bones.
+    void applyFaceFx( Pnj &pnj, const CinematicScene &scene, const CinematicScene::Object &object, float sceneTime,
+                      std::vector<BoneTransform> &locals );
+    // FUN_00b871a0 / FUN_00b89730 cone test: LookAt_T2 registers of the
+    // frame (pnj.bLookAt / pnj.LookAt) from the property LookAtTargetFaceFx
+    // or the lkon message.
+    void computeLookAt( Pnj &pnj, const CinematicScene &scene, const CinematicScene::Object &object, float sceneTime,
+                        const std::vector<BoneTransform> &locals, const Matrix4x4f &world );
     void loadLights( const XmbDocument &entities );
     void computeAvatarLighting( const Vector3f &rootPosition, EdenAvatarLighting &outLighting ) const;
     bool computeCarWorld( Matrix4x4f &outWorld ) const;

@@ -17,6 +17,9 @@
 
 namespace {
 constexpr uint32_t kTrackAnimation = 0xdcd2e210; // "Animation"
+constexpr uint32_t kTrackMorph = 0x70726fb5;     // "Morph" (FaceFX)
+constexpr uint16_t kRefMorph = 0x0306;           // .sce REFS FaceFX animation
+constexpr float kFaceFxFade = 0.2f;              // DAT_00ede428 (FUN_00b77600 / FUN_00b77b20)
 // CinProps bits (intro_spec 7.2).
 constexpr uint32_t kCinPropLoop = 0x2;
 constexpr uint32_t kCinPropNoCamera = 0x10;
@@ -127,6 +130,9 @@ bool IntroCinematic::load( const Setup &newSetup ) {
         [this]( EdenRenderer &renderer, EdenSceneView::ePass pass ) { drawSets( renderer, pass ); } );
     loadSets( entities );
     loadPnjs( entities );
+    if ( !pnjs.empty() && !CmdLine::HasArg( "-nofacefx" ) && faceFx.load() ) {
+        faceFx.addAnimSets( introBank );
+    }
     loadVolumes( entities );
     loadLights( entities );
     collision = HavokCollision();
@@ -157,6 +163,7 @@ void IntroCinematic::unload() {
     view.destroy();
     car.unload();
     bCarEnvironment = false;
+    bCarStaticCube = false;
     entityPlacements.clear();
     cinCarHashcodes.clear();
     sets.clear();
@@ -167,6 +174,7 @@ void IntroCinematic::unload() {
     animations.clear();
     entityCameras.clear();
     avatarLibrary.unload();
+    faceFx.unload();
     if ( !exteriorBank.getEntries().empty() ) {
         gpRender->getTextureCache().releaseOwner( exteriorBank.getPath().c_str() );
     }
@@ -844,7 +852,7 @@ bool IntroCinematic::Volume::contains( const Vector3f &p ) const {
 }
 
 bool IntroCinematic::Volume::raycast( const Vector3f &origin, const Vector3f &direction, float maxDistance,
-                                      float &outT ) const {
+                                      float &outT, float *pOutExit ) const {
     // Slab test in the unit box (the selectable hit test vf04 is encrypted
     // [ENC]; the volume shape is the data).
     const Vector3f o = toUnit( origin );
@@ -872,6 +880,9 @@ bool IntroCinematic::Volume::raycast( const Vector3f &origin, const Vector3f &di
         }
     }
     outT = tMin;
+    if ( pOutExit != nullptr ) {
+        *pOutExit = tMax;
+    }
     return true;
 }
 
@@ -956,7 +967,7 @@ void IntroCinematic::updateView() {
                          ? nullptr
                          : view.getWeathers().findModified( weatherName.c_str(), modifierName.c_str() ) );
     Matrix4x4f carWorld;
-    if ( car.isLoaded() && computeCarWorld( carWorld ) ) {
+    if ( car.isLoaded() && !bCarStaticCube && computeCarWorld( carWorld ) ) {
         view.setEnvironmentCenter( carWorld.getTranslation(), true );
     } else {
         view.setEnvironmentCenter( camera.Position, false );
@@ -1059,7 +1070,23 @@ bool IntroCinematic::loadCar( const CinematicCar::Desc &desc, const std::string 
     carRestEntity = restEntity;
     auto it = cinCarHashcodes.find( cinCarEntity );
     carEntityHashcode = it != cinCarHashcodes.end() ? it->second : 0;
-    return car.load( desc );
+    if ( !car.load( desc ) ) {
+        return false;
+    }
+    // FIRST_WM load (FUN_009aa2c0): FUN_00a4baf0 looks the scene bank
+    // textures up for "CUBECAR" (garage.bnk cubecar.2db, a 512^2 cube shot
+    // in the garage) and the car slot manager binds it to the cars as their
+    // static cube (FUN_00c62440 -> FUN_00d58d20) instead of the dynamic
+    // one (docs/re/car_glass_spec.md).
+    bCarStaticCube = false;
+    static const bool bNoCubeCar = CmdLine::HasArg( "-nocubecar" ); // comparisons: dynamic cube
+    GPUTexture *pCube =
+        bNoCubeCar ? nullptr : gpRender->getTextureCache().find( introBank.getPath().c_str(), "CUBECAR" );
+    if ( pCube != nullptr ) {
+        car.assignEnvironment( *gpRender->getEdenRenderer(), pCube, false );
+        bCarStaticCube = true;
+    }
+    return true;
 }
 
 bool IntroCinematic::computeCarWorld( Matrix4x4f &outWorld ) const {
@@ -1102,7 +1129,7 @@ void IntroCinematic::renderOffscreen() {
     }
     updateView();
     updatePnjs();
-    if ( car.isLoaded() && !bCarEnvironment ) {
+    if ( car.isLoaded() && !bCarEnvironment && !bCarStaticCube ) {
         if ( GPUTexture *pCube = view.getEnvironmentCube() ) {
             car.assignEnvironment( *gpRender->getEdenRenderer(), pCube );
             bCarEnvironment = true;
@@ -1268,11 +1295,13 @@ void IntroCinematic::loadBankModels( const Bank &bank, const BankHashcodes &hash
         XmbValue actor = entityExport.getArrayElement( "ArrayOf_Entity__Actor", i );
         Prop prop;
         prop.Name = actor["__Name"].asString();
-        // HOLOGRAMS: the LIVING mode icons; their visibility in the intro
-        // is encrypted [ENC]: hidden [INF].
-        if ( prop.Name == "HOLOGRAMS" ) {
-            continue;
-        }
+        // HOLOGRAMS (new_intro: the garage icon + pulse rings above the
+        // garage door): entities are created active (+0x9c = 7, bit 0 =
+        // active: updated FUN_00dc7290 / shown FUN_00b45960, ctor 0xb94ef0);
+        // FUN_009b4360 / FUN_009b42d0 clear / set that bit of "HOLOGRAMS"
+        // only around photo mode, the shop UI and the LIVING sub-modes,
+        // never in AVATAR_CHOICE, and no cinematic of the bank references
+        // it: shown all along [CODE + DATA].
         prop.Model = loadModel( firstMesh( actor, "mesh" ) );
         if ( !prop.Model ) {
             continue;
@@ -1471,12 +1500,295 @@ void IntroCinematic::animatePnj( Pnj &pnj, const Playing &playing, const Cinemat
             locals = current;
         }
     }
-    skeleton.computeSkinMatrices( locals, pnj.WorldBones, pnj.Skin );
     // ActorWorld = S * R(q*) * T(pos) * Origin.
     pnj.World = sceneOrigin * scene.getOrigin() * Matrix4x4f::Translation( object.samplePosition( sceneTime ) ) *
                 EdenRotationFromQuaternion( object.sampleRotation( sceneTime ) );
+    computeLookAt( pnj, scene, object, sceneTime, locals, pnj.World );
+    applyFaceFx( pnj, scene, object, sceneTime, locals );
+    skeleton.computeSkinMatrices( locals, pnj.WorldBones, pnj.Skin );
     pnj.bVisible = true;
     computeAvatarLighting( pnj.World.getTranslation(), pnj.Lighting );
+}
+
+bool IntroCinematic::setLookAtTarget( const std::string &pnjName, const Vector3f &worldTarget ) {
+    // FUN_00b858f0: copies the target vec4 (a snapshot, not a pointer).
+    for ( Pnj &pnj : pnjs ) {
+        if ( pnj.Name == pnjName ) {
+            pnj.LookTarget = worldTarget;
+            pnj.bLookOn = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IntroCinematic::stopLookAt( const std::string &pnjName ) {
+    // lkof (FUN_00b8dcd0): +0x1d68 = 1.
+    for ( Pnj &pnj : pnjs ) {
+        if ( pnj.Name == pnjName ) {
+            pnj.bLookOn = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+void IntroCinematic::computeLookAt( Pnj &pnj, const CinematicScene &scene, const CinematicScene::Object &object,
+                                    float sceneTime, const std::vector<BoneTransform> &locals,
+                                    const Matrix4x4f &world ) {
+    // docs/re/facefx_spec.md 6. Two sources set the eye target (avatar
+    // +0x1e30, flag +0x1e40) consumed once per frame by FUN_00b871a0:
+    // - the actor property "LookAtTargetFaceFx" (FUN_00b854d0 -> +0x1c58;
+    //   FUN_00b869e0: "-m" -> "-w" for a woman, the cinematic object of that
+    //   name -> +0x210): target = that object's position, every frame;
+    // - the actor message lkon (FUN_00b8dcd0 -> FUN_00b858f0(camera position
+    //   DAT_01195b80, 1)) / lkof (+0x1d68 = 1): the head controller
+    //   FUN_00b89730 passes the target on when dot(normalize(target - Head),
+    //   actor forward) > 0.2 (+0x1e04, DAT_00ede428).
+    pnj.bLookAt = false;
+    if ( !faceFx.isLoaded() || !pnj.Avatar ) {
+        return;
+    }
+    // lkon / lkof: the last key <= scene time; the target is captured when
+    // the key is reached (FUN_00b858f0 copies the camera position once).
+    if ( const CinematicScene::Track *pMessages = object.findTrack( CinematicScene::kTrackMessage ) ) {
+        const void *pKey = nullptr;
+        bool bOn = false;
+        for ( size_t k = 0; k < pMessages->Times.size() && pMessages->NumComponents >= 1; k++ ) {
+            if ( pMessages->Times[k] > sceneTime ) {
+                break;
+            }
+            uint32_t ref = 0;
+            memcpy( &ref, &pMessages->Values[k * pMessages->NumComponents], sizeof( ref ) );
+            if ( ref >= scene.getReferences().size() ) {
+                continue;
+            }
+            const std::string &message = scene.getReferences()[ref].Name;
+            if ( message == "lkon" || message == "lkof" ) {
+                pKey = &pMessages->Values[k * pMessages->NumComponents];
+                bOn = message == "lkon";
+            }
+        }
+        if ( pKey != pnj.pLookMessageKey ) {
+            pnj.pLookMessageKey = pKey;
+            if ( pKey != nullptr ) {
+                pnj.bLookOn = bOn;
+                if ( bOn ) {
+                    pnj.LookTarget = camera.Position; // DAT_01195b80 [INF: view position]
+                }
+            }
+        }
+    } else {
+        // No message track: the state set by an earlier lkon / lkof or by
+        // setLookAtTarget stays (only FUN_00b858f0 and lkof write it).
+        pnj.pLookMessageKey = nullptr;
+    }
+
+    const EdenSkeleton &skeleton = pnj.Avatar->getSkeleton();
+    std::vector<Matrix4x4f> bones, skin;
+    bool bPose = false;
+    auto boneWorld = [&]( const char *pName, Matrix4x4f &outMatrix ) {
+        const int32_t b = skeleton.findBone( EdenNameHash4( pName ) );
+        if ( b < 0 ) {
+            return false;
+        }
+        if ( !bPose ) {
+            skeleton.computeSkinMatrices( locals, bones, skin );
+            bPose = true;
+        }
+        outMatrix = world * bones[b];
+        return true;
+    };
+
+    Vector3f target;
+    bool bProperty = false;
+    bool bTarget = false;
+    if ( const CinematicScene::Property *pProperty = object.findProperty( "LookAtTargetFaceFx" ) ) {
+        std::string name = pProperty->valueAt( sceneTime );
+        const size_t male = name.find( "-m" );
+        if ( pnj.Avatar->isWoman() && male != std::string::npos ) {
+            name = name.substr( 0, male ) + "-w"; // writes "-w\0" (0xf0b5a8)
+        }
+        if ( const CinematicScene::Object *pTarget = name.empty() ? nullptr : scene.findObject( name.c_str() ) ) {
+            target = ( sceneOrigin * scene.getOrigin() ).transformPoint( pTarget->samplePosition( sceneTime ) );
+            bProperty = bTarget = true;
+        }
+    }
+    Matrix4x4f head;
+    if ( !bTarget && pnj.bLookOn && boneWorld( "Head", head ) ) {
+        // FUN_00b89730: cone test against row 2 of the actor matrix.
+        const Vector3f direction = ( pnj.LookTarget - head.getTranslation() ).normalized();
+        const Vector3f forward = world.transformVector( Vector3f( 0.0f, 0.0f, 1.0f ) );
+        if ( direction.dot( forward ) > 0.2f ) {
+            target = pnj.LookTarget;
+            bTarget = true;
+        }
+    }
+    Matrix4x4f eyeL, eyeR;
+    if ( !bTarget || !boneWorld( "L_Eye_All", eyeL ) || !boneWorld( "R_Eye_All", eyeR ) ) {
+        return;
+    }
+    // FUN_00b871a0: mid point of the eyes; up = world Y with a property
+    // target, else the Y axis (row 1) of R_Eye_All; side = dot(axis, dir),
+    // vertical = dot(up without its axis part, dir) (0x42c2a0 / 0x433510
+    // [ENC]: cross product / normalisation [INF]).
+    const Vector3f left = eyeL.getTranslation();
+    const Vector3f right = eyeR.getTranslation();
+    const Vector3f middle = ( left + right ) * 0.5f;
+    Vector3f up = bProperty ? Vector3f( 0.0f, 1.0f, 0.0f )
+                            : Vector3f( eyeR.m[1][0], eyeR.m[1][1], eyeR.m[1][2] ).normalized();
+    const Vector3f axis = ( left - right ).normalized();
+    const Vector3f forward = up.cross( left - right ).normalized();
+    const Vector3f upright = axis.cross( forward ).normalized();
+    const Vector3f direction = ( target - middle ).normalized();
+    float side = axis.dot( direction );
+    float vertical = upright.dot( direction );
+    if ( !bProperty ) {
+        // Head controller target: vertical clamped to [-0.2, 0.07]
+        // (0.07 @0xedf1f4, -0.2 @0xf49c98 / 0xf7db64).
+        if ( vertical > 0.07f ) {
+            vertical = 0.07f;
+        }
+        if ( -0.2 > vertical ) {
+            vertical = -0.2f;
+        }
+    }
+    pnj.bLookAt = true;
+    pnj.LookAt[0] = side;
+    pnj.LookAt[1] = vertical;
+    if ( CmdLine::HasArg( "-logfacefx" ) ) {
+        OTDU_LOG_INFO( "FaceFX look-at: %s %s side %.3f vertical %.3f target (%.2f %.2f %.2f)\n", pnj.Name.c_str(),
+                       bProperty ? "property" : "lkon", side, vertical, target.x, target.y, target.z );
+    }
+}
+
+void IntroCinematic::applyFaceFx( Pnj &pnj, const CinematicScene &scene, const CinematicScene::Object &object,
+                                  float sceneTime, std::vector<BoneTransform> &locals ) {
+    // .sce "Morph" track: 5 dwords per key {u32 REFS index (0x0306
+    // "<path>\female.fxa::<group>:<anim>"), u64 (hash), f32 clip length,
+    // u32 0}. A key starts the FaceFX animation on the actor's animator
+    // (vtable 0xeabc8c slot 6 FUN_00d96ab0 -> FUN_00b77a50 -> FUN_00b77600,
+    // fade 0.2 s); FUN_00b77b20 ticks it with the frame time and writes the
+    // 42 facial bones over the skeleton pose while it plays (its end:
+    // FxAnim end time, then a 0.2 s fade, FUN_00480d10 [ENC]).
+    // Here: stateless at the scene time (anim time = scene time - key time),
+    // linear 0.2 s blends in / out [INF].
+    if ( !faceFx.isLoaded() || !pnj.Avatar ) {
+        return;
+    }
+    const FaceFxActor *pActor = faceFx.getActor( pnj.Avatar->isWoman() );
+    const CinematicScene::Track *pTrack = object.findTrack( kTrackMorph );
+    const EdenSkeleton &skeleton = pnj.Avatar->getSkeleton();
+    auto animOf = [&]( size_t key ) -> const FaceFxAnim * {
+        uint32_t ref = 0;
+        const float bits = pTrack->Values[key * pTrack->NumComponents];
+        memcpy( &ref, &bits, sizeof( ref ) );
+        if ( ref >= scene.getReferences().size() || scene.getReferences()[ref].Type != kRefMorph ) {
+            return nullptr;
+        }
+        return faceFx.findAnim( *pActor, scene.getReferences()[ref].Name );
+    };
+    // Weight of key k at the scene time (0 when not playing).
+    auto weightOf = [&]( size_t key, const FaceFxAnim &anim, float &outAnimTime ) {
+        const float animTime = sceneTime - pTrack->Times[key];
+        outAnimTime = Min( animTime, anim.EndTime );
+        if ( animTime < 0.0f ) {
+            return 0.0f;
+        }
+        float weight = Min( animTime / kFaceFxFade, 1.0f );
+        if ( animTime > anim.EndTime ) {
+            weight = Min( weight, 1.0f - ( animTime - anim.EndTime ) / kFaceFxFade );
+        }
+        return Max( weight, 0.0f );
+    };
+    FaceFxPose pose, previousPose;
+    float weight = 0.0f;
+    const float *pLook = pnj.bLookAt ? pnj.LookAt : nullptr;
+    if ( pActor != nullptr && pTrack != nullptr && pTrack->NumComponents >= 1 && !pTrack->Times.empty() ) {
+        size_t key = 0;
+        bool bFound = false;
+        for ( size_t k = 0; k < pTrack->Times.size(); k++ ) {
+            if ( pTrack->Times[k] <= sceneTime ) {
+                key = k;
+                bFound = true;
+            }
+        }
+        const FaceFxAnim *pAnim = bFound ? animOf( key ) : nullptr;
+        float animTime = 0.0f;
+        if ( pAnim != nullptr && ( weight = weightOf( key, *pAnim, animTime ) ) > 0.0f ) {
+            FaceFxLibrary::Evaluate( *pActor, pAnim, animTime, pnj.Avatar->getFaceParams(), pLook, pose );
+            // Blend in from the previous animation while it still plays.
+            const FaceFxAnim *pPrevious = key > 0 ? animOf( key - 1 ) : nullptr;
+            float previousTime = 0.0f;
+            const float previousWeight =
+                weight < 1.0f && pPrevious != nullptr ? weightOf( key - 1, *pPrevious, previousTime ) : 0.0f;
+            if ( previousWeight > 0.0f ) {
+                FaceFxLibrary::Evaluate( *pActor, pPrevious, previousTime, pnj.Avatar->getFaceParams(), pLook,
+                                         previousPose );
+            }
+            auto blend = [&]( const FaceFxPose &facePose, float w ) {
+                for ( const auto &entry : facePose.Bones ) {
+                    const int32_t bone = skeleton.findBone( entry.first );
+                    if ( bone < 0 || static_cast<size_t>( bone ) >= locals.size() ) {
+                        continue;
+                    }
+                    if ( w >= 1.0f ) {
+                        locals[bone] = entry.second;
+                    } else {
+                        std::vector<BoneTransform> a( 1, locals[bone] ), b( 1, entry.second ), out;
+                        BlendPoses( a, b, w, out );
+                        locals[bone] = out[0];
+                    }
+                }
+            };
+            auto madd = []( const Vector4f &a, const Vector4f &b, float w ) {
+                return Vector4f( a.x + b.x * w, a.y + b.y * w, a.z + b.z * w, a.w + b.w * w );
+            };
+            const Vector4f zero( 0.0f, 0.0f, 0.0f, 0.0f );
+            Vector4f coef1 = madd( zero, pose.FacialCoef1, weight ), coef2 = madd( zero, pose.FacialCoef2, weight );
+            if ( previousWeight > 0.0f ) {
+                blend( previousPose, previousWeight );
+                coef1 = madd( coef1, previousPose.FacialCoef1, previousWeight * ( 1.0f - weight ) );
+                coef2 = madd( coef2, previousPose.FacialCoef2, previousWeight * ( 1.0f - weight ) );
+            }
+            blend( pose, weight );
+            pnj.Avatar->setFacialCoefficients( coef1, coef2 );
+            if ( CmdLine::HasArg( "-logfacefx" ) ) {
+                static const uint32_t kLowerLip = EdenNameHash4( "L_LowerLip" );
+                for ( const auto &entry : pose.Bones ) {
+                    if ( entry.first == kLowerLip ) {
+                        OTDU_LOG_INFO( "FaceFX: %s %s t=%.3f w=%.2f L_LowerLip q(%.4f %.4f %.4f %.4f) "
+                                       "t(%.5f %.5f %.5f) coef1(%.3f %.3f %.3f) coef2(%.3f %.3f %.3f)\n",
+                                       pnj.Name.c_str(), pAnim->Name.c_str(), animTime, weight,
+                                       entry.second.Rotation.x, entry.second.Rotation.y, entry.second.Rotation.z,
+                                       entry.second.Rotation.w, entry.second.Translation.x,
+                                       entry.second.Translation.y, entry.second.Translation.z, coef1.x, coef1.y,
+                                       coef1.z, coef2.x, coef2.y, coef2.z );
+                    }
+                }
+            }
+            pnj.bFaceFxUsed = true;
+            return;
+        }
+    }
+    if ( pActor != nullptr && pLook != nullptr ) {
+        // No animation: the animator still ticks while the look-at runs
+        // (FUN_00b75f50 sets +0x1ec0 / +0x1ec2): graph = registers only.
+        FaceFxLibrary::Evaluate( *pActor, nullptr, 0.0f, pnj.Avatar->getFaceParams(), pLook, pose );
+        for ( const auto &entry : pose.Bones ) {
+            const int32_t bone = skeleton.findBone( entry.first );
+            if ( bone >= 0 && static_cast<size_t>( bone ) < locals.size() ) {
+                locals[bone] = entry.second;
+            }
+        }
+        pnj.Avatar->setFacialCoefficients( pose.FacialCoef1, pose.FacialCoef2 );
+        pnj.bFaceFxUsed = true;
+        return;
+    }
+    if ( pnj.bFaceFxUsed ) {
+        // FUN_00b77b20 fade branch: zero coefficients once FaceFX stopped.
+        pnj.Avatar->setFacialCoefficients( Vector4f( 0.0f, 0.0f, 0.0f, 0.0f ), Vector4f( 0.0f, 0.0f, 0.0f, 0.0f ) );
+    }
 }
 
 void IntroCinematic::updatePnjs() {

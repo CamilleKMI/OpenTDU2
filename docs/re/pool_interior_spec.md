@@ -344,7 +344,7 @@ Bank naming [DATA, from the file names]:
 | D_SCENE | Scenery | `intro_lph_l3di_349E1852FA421941` (identity). Main mesh `LPH_L3DI` (52 materials), COLLISION boxes, `TV`→`GLASS`, `LIGHTS`, `FLARE` (halo), `PC_MEDIA` |
 | D_REFLECT | **Entity__Actor__Mesh** | `lph_l3di_59E1…` (REFRACT→POOL `bassin`; GROUND2 mirror plane → PLANE_01 `Artworks_01`) — **OpenTDU2 does not load it** (it only walks ArrayOf_Entity__Actor) |
 | furniture | Entity__Actor | `intro_lph_l3di_objects_*`: TabRecE, sofaL_A, Sofa1P_A, TabDineC, ChaiSalD(_01…_05), ChaiBarD(_01,_02) |
-| HOLOGRAMS | Entity__Actor | `intro_lph_l3di_71E5…`: the LIVING-mode icons (T_Sprite_Garage/Ingame/Diary, Pulse_DarkBlue UVA). Visibility in C_INTRO is unknown [ENC] |
+| HOLOGRAMS | Entity__Actor | `intro_lph_l3di_71E5…`: the garage-door marker (T_Sprite_Garage + Pulse_DarkBlue UVA rings, one instance at (20.38, 33.76, 3.19)). Active by default, only hidden/shown by LIVING/photo/shop code → visible in AVATAR_CHOICE (tess_garage_spec §5.1b) [CODE] |
 | party props | Entity__Actor | cf_mix, cf_speak, cf_plat, cf_tabl, cf_buoy, pc_media |
 | lights | 55 Entity__Light | 23 `RT_Int_*` (isInterior 1) + 32 `RT_Ext_*` |
 | cameras | 7 Entity__Camera | cam_entree_01…06 (≈ x 0…2.4, y 32.6: terrace→living entrance), NO_CAMERA |

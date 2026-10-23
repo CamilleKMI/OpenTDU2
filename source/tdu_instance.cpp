@@ -17,6 +17,7 @@
 #include "game/avatarchoice/gm_avatar_choice.h"
 #include "game/firstwalkmode/gm_first_walk_mode.h"
 #include "game/freeride/gm_freeride.h"
+#include "game/worldviewer/gm_world_viewer.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -255,6 +256,8 @@ std::unique_ptr<GameMode> TestDriveGameInstance::createGameMode( eGameMode mode 
         return std::make_unique<GMFirstWalkMode>();
     case eGameMode::GM_FreeRide:
         return std::make_unique<GMFreeRide>();
+    case eGameMode::GM_WorldViewer:
+        return std::make_unique<GMWorldViewer>();
     default:
         OTDU_LOG_WARN( "Game mode '%s' is not implemented yet\n", GetGameModeName( mode ) );
         return nullptr;
@@ -359,6 +362,9 @@ void TestDriveGameInstance::mainLoop() {
             }
 
             pImGui->beginFrame( deltaTime );
+            if ( pActiveGameMode != nullptr ) {
+                pActiveGameMode->drawUI();
+            }
             if ( bShowDebugUI ) {
                 for ( GameSystem *pService : services ) {
                     pService->drawDebug();
@@ -383,7 +389,11 @@ void TestDriveGameInstance::mainLoop() {
 // Scripted input for automated tests, e.g.
 //   -autoplay "60:press=validate;90:text=Camille;120:shot=/tmp/a.ppm"
 // Commands: press=<action>, hold=<action>, release=<action>, text=<utf8>, shot=<path>,
-//           mouse=<dx>,<dy> (relative mouse motion, pixels)
+//           mouse=<dx>,<dy> (relative mouse motion, pixels),
+//           key=<SDL scancode name> (raw key press, e.g. key=4 main row, key=Keypad 4),
+//           hold= / release=<SDL scancode name> (raw key held, e.g. hold=W, hold=Left Shift)
+//           or mouse_left / mouse_right / mouse_middle (mouse button held),
+//           wheel=<notches> (mouse wheel)
 void TestDriveGameInstance::parseAutoplay( const char *pScript ) {
     std::string script( pScript );
     size_t start = 0;
@@ -436,20 +446,55 @@ void TestDriveGameInstance::runAutoplay() {
             pInput->injectMouseDelta( dx, dy );
             continue;
         }
+        if ( command.Command == "key" ) {
+            const SDL_Scancode scancode = SDL_GetScancodeFromName( command.Argument.c_str() );
+            if ( scancode != SDL_SCANCODE_UNKNOWN ) {
+                pInput->injectKeyPress( static_cast<int32_t>( scancode ) );
+            } else {
+                OTDU_LOG_WARN( "Autoplay: unknown key '%s'\n", command.Argument.c_str() );
+            }
+            continue;
+        }
+        if ( command.Command == "wheel" ) {
+            pInput->injectMouseWheel( static_cast<float>( atof( command.Argument.c_str() ) ) );
+            continue;
+        }
         if ( command.Command == "shot" ) {
             pRender->getDevice().requestScreenshot( command.Argument.c_str() );
             continue;
         }
+        bool bAction = false;
         for ( const auto &action : kActions ) {
             if ( command.Argument != action.first ) {
                 continue;
             }
+            bAction = true;
             if ( command.Command == "press" ) {
                 pInput->injectPress( action.second );
             } else if ( command.Command == "hold" ) {
                 pInput->setInjectedHold( action.second, true );
             } else if ( command.Command == "release" ) {
                 pInput->setInjectedHold( action.second, false );
+            }
+        }
+        if ( !bAction && ( command.Command == "hold" || command.Command == "release" ) ) {
+            const bool bHold = command.Command == "hold";
+            static const std::pair<const char *, int32_t> kButtons[] = {
+                { "mouse_left", SDL_BUTTON_LEFT }, { "mouse_right", SDL_BUTTON_RIGHT }, { "mouse_middle", SDL_BUTTON_MIDDLE } };
+            bool bButton = false;
+            for ( const auto &button : kButtons ) {
+                if ( command.Argument == button.first ) {
+                    pInput->setInjectedMouseButton( button.second, bHold );
+                    bButton = true;
+                }
+            }
+            if ( !bButton ) {
+                const SDL_Scancode scancode = SDL_GetScancodeFromName( command.Argument.c_str() );
+                if ( scancode != SDL_SCANCODE_UNKNOWN ) {
+                    pInput->setInjectedKeyHold( static_cast<int32_t>( scancode ), bHold );
+                } else {
+                    OTDU_LOG_WARN( "Autoplay: unknown action / key '%s'\n", command.Argument.c_str() );
+                }
             }
         }
     }

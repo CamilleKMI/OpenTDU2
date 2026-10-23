@@ -202,7 +202,10 @@ public:
     TransientAllocation allocateTransient( VkDeviceSize size,
                                            VkDeviceSize alignment = 16 );
 
-    VkSampler getSampler( eSamplerFilter filter, eSamplerAddress address );
+    VkSampler getSampler( eSamplerFilter filter, eSamplerAddress address ) {
+        return getSampler( filter, address, address );
+    }
+    VkSampler getSampler( eSamplerFilter filter, eSamplerAddress addressU, eSamplerAddress addressV );
 
     // Default pipeline layout: set 0 = kMaxTexturesPerSet combined image
     // samplers (fragment), push constants = kPushConstantsSize bytes.

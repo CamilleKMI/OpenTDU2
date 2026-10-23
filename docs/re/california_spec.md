@@ -85,3 +85,6 @@ data), needle between ND_x_1 (value 0, rest pose of ND_x) and ND_x_2.
   < 5 m -> COCK_HR subtree (without BELT_L / R) + INT_HR_L / R of the interior bank, COCK_LR /
   INT_LR_L / INT_LR_R hidden; otherwise the reverse. `-carlod 4|3` forces it. LODs 0..2 not used
   (camera factor +0x17c unknown).
+* Reflections (docs/re/car_glass_spec.md): in FIRST_WM the car materials whose REFLECTION texture is
+  CUBEMAP get the garage bank cube CUBECAR (static, SPECPARM.z / RAMPPOW.z = 1, FUN_009aa2c0 ->
+  FUN_00a4baf0 -> FUN_00c62440 / FUN_00d58d20); elsewhere the dynamic cube (z = 0).

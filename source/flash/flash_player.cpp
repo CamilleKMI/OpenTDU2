@@ -401,7 +401,9 @@ void FlashPlayer::gotoFrame( Clip &clip, uint32_t frame, bool bQueueActions ) {
         }
         for ( auto it = clip.DisplayList.begin(); it != clip.DisplayList.end(); ) {
             auto found = state.find( it->first );
-            if ( found == state.end() || found->second.CharacterId != it->second->CharacterId ) {
+            if ( it->second->bScripted ) {
+                ++it; // attachMovie instances are not part of the timeline
+            } else if ( found == state.end() || found->second.CharacterId != it->second->CharacterId ) {
                 graveyard.push_back( std::move( it->second ) );
                 it = clip.DisplayList.erase( it );
             } else {
@@ -518,6 +520,34 @@ void FlashPlayer::initClip( Instance &instance, Clip *pParent, bool bQueueAction
     clip.pInstance = &instance;
     clip.CurrentFrame = 0;
     applyControlTags( clip, 0, bQueueActions );
+}
+
+FlashPlayer::Value FlashPlayer::attachMovie( Clip &clip, const std::string &linkage, const std::string &name,
+                                             int32_t depth ) {
+    const auto &exports = pMovie->getVMF().getExports();
+    auto exported = exports.find( linkage );
+    if ( exported == exports.end() ) {
+        OTDU_LOG_WARN( "FlashPlayer: attachMovie: no export '%s'\n", linkage.c_str() );
+        return Value();
+    }
+    // Script depths are above the timeline ones (Flash: timeline depth d is
+    // d - 16384, scripted depths start at 0).
+    const uint16_t key = static_cast<uint16_t>( kScriptDepthBase + Clamp( depth, 0, 0x3fff ) );
+    removeObject( clip, key );
+    auto pNew = std::make_unique<Instance>();
+    pNew->CharacterId = exported->second;
+    pNew->Depth = key;
+    pNew->Name = name;
+    pNew->bScripted = true;
+    Instance *pInstance = pNew.get();
+    clip.DisplayList[key] = std::move( pNew );
+    Value result;
+    if ( definitions.getType( pInstance->CharacterId ) == eFlashCharacterType::CT_Sprite ) {
+        initClip( *pInstance, &clip, true );
+        result.Type = Value::eType::Clip;
+        result.pClip = pInstance->pClip.get();
+    }
+    return result;
 }
 
 void FlashPlayer::removeObject( Clip &clip, uint16_t depth ) {
@@ -897,6 +927,12 @@ FlashPlayer::Value FlashPlayer::callMethod( Value &object, const std::string &na
         } else if ( method == "prevframe" && target.CurrentFrame > 0 ) {
             gotoFrame( target, target.CurrentFrame - 1, true );
             target.bPlaying = false;
+        } else if ( method == "attachmovie" && args.size() >= 2 ) {
+            // attachMovie(linkage, name, depth) (method name at 0x00e4b37c):
+            // instance of an ExportAssets symbol, e.g. INTRO low_bar
+            // ic.attachMovie('specificIcons', 'icLoaded', 0) (sprite 3).
+            return attachMovie( target, args[0].toString(), args[1].toString(),
+                                args.size() >= 3 ? static_cast<int32_t>( args[2].toNumber() ) : 0 );
         } else {
             Value member = getMember( object, name );
             if ( member.Type == Value::eType::Function ) {

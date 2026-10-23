@@ -44,6 +44,26 @@ const CinematicScene::Track *CinematicScene::Object::findTrack( uint32_t id ) co
     return nullptr;
 }
 
+const CinematicScene::Property *CinematicScene::Object::findProperty( const char *pName ) const {
+    for ( const Property &property : Properties ) {
+        if ( property.Name == pName ) {
+            return &property;
+        }
+    }
+    return nullptr;
+}
+
+const std::string &CinematicScene::Property::valueAt( float time ) const {
+    static const std::string kEmpty;
+    const std::string *pValue = &kEmpty;
+    for ( size_t k = 0; k < Times.size() && k < Values.size(); k++ ) {
+        if ( Times[k] <= time ) {
+            pValue = &Values[k];
+        }
+    }
+    return *pValue;
+}
+
 Vector3f CinematicScene::Object::samplePosition( float time ) const {
     const Track *pTrack = findTrack( kTrackPosition );
     if ( pTrack == nullptr || pTrack->NumComponents < 3 || pTrack->Times.empty() ) {
@@ -139,6 +159,32 @@ bool CinematicScene::parseScene( const uint8_t *pData, size_t size ) {
             if ( trackSize < 0x14 || trackOffset + trackSize > offset + objectSize ) {
                 break;
             }
+            if ( ReadAt<uint32_t>( pChunk, trackOffset + 8 ) == kTrackProperty && trackSize >= 0x10 + 0x80 ) {
+                Property property;
+                const char *pPropertyName = reinterpret_cast<const char *>( pChunk + trackOffset + 0x10 );
+                property.Name.assign( pPropertyName, strnlen( pPropertyName, 0x80 ) );
+                const uint32_t numSub = ReadAt<uint32_t>( pChunk, trackOffset + 12 );
+                size_t sub = trackOffset + 0x90;
+                for ( uint32_t s = 0; s < numSub && sub + 0x14 <= trackOffset + trackSize; s++ ) {
+                    const uint32_t subSize = ReadAt<uint32_t>( pChunk, sub + 4 );
+                    const uint32_t numKeys = ReadAt<uint32_t>( pChunk, sub + 12 );
+                    if ( subSize < 0x14 || sub + subSize > trackOffset + trackSize ) {
+                        break;
+                    }
+                    size_t key = sub + 0x14 + static_cast<size_t>( numKeys ) * 4;
+                    for ( uint32_t k = 0; k < numKeys && key + 8 <= sub + subSize; k++ ) {
+                        property.Times.push_back( ReadAt<float>( pChunk, sub + 0x14 + k * 4 ) );
+                        const char *pValue = reinterpret_cast<const char *>( pChunk + key + 8 );
+                        const size_t length = strnlen( pValue, sub + subSize - key - 8 );
+                        property.Values.emplace_back( pValue, length );
+                        key += 8 + length + 1; // [INF] keys packed one after the other
+                    }
+                    sub += subSize;
+                }
+                object.Properties.push_back( std::move( property ) );
+                trackOffset += trackSize;
+                continue;
+            }
             Track track;
             track.Id = ReadAt<uint32_t>( pChunk, trackOffset + 8 );
             const uint32_t numKeys = ReadAt<uint32_t>( pChunk, trackOffset + 12 );
@@ -172,12 +218,20 @@ bool CinematicScene::parseScene( const uint8_t *pData, size_t size ) {
             Reference reference;
             reference.Type = ReadAt<uint16_t>( pData, entry );
             const uint16_t entrySize = ReadAt<uint16_t>( pData, entry + 2 );
-            if ( entrySize < 12 || entry + entrySize > end ) {
+            if ( entrySize < ( reference.Type == kRefMessage ? 4 : 12 ) || entry + entrySize > end ) {
                 break;
             }
-            reference.Hashcode = ReadAt<uint64_t>( pData, entry + 4 );
-            const char *pName = reinterpret_cast<const char *>( pData + entry + 12 );
-            reference.Name.assign( pName, strnlen( pName, entrySize - 12 ) );
+            if ( reference.Type == kRefMessage ) {
+                // Message string (lkon, lkof...): no hashcode, the text
+                // follows the 4 byte header [DATA M_WALKMODE_walkmode.sce
+                // "0b 02 0c 00 'lkon' 00 ..."].
+                const char *pName = reinterpret_cast<const char *>( pData + entry + 4 );
+                reference.Name.assign( pName, strnlen( pName, entrySize - 4 ) );
+            } else {
+                reference.Hashcode = ReadAt<uint64_t>( pData, entry + 4 );
+                const char *pName = reinterpret_cast<const char *>( pData + entry + 12 );
+                reference.Name.assign( pName, strnlen( pName, entrySize - 12 ) );
+            }
             references.push_back( std::move( reference ) );
             entry += entrySize;
         }

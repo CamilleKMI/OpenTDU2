@@ -323,9 +323,15 @@ bool LoadVehicleSetup( const std::string &carFileName, VehicleSetup &out ) {
     out.BlueLine = dbI( "_blue_line", 6000 ) * kRpmToRads;
     out.RedLine = dbI( "_red_line", 7000 ) * kRpmToRads;
     out.EngineMaxVelocity = dbI( "_rpm_max", 7500 ) * kRpmToRads;
-    out.LimiterTime = dbF( "_rupteur_time", 0.05f );
-    out.StartingTime = dbF( "_time_ignition", 0.5f );
+    out.LimiterTime = dbF( "_rupteur_time", 0.09f );
+    out.StartingTime = dbF( "_time_ignition", 0.65f );
     out.PowerRpm = dbI( "_power_rpm", 6000 );
+    // Game car object (FUN_00baddd0): +0x44/+0x48 (normal / sport lines),
+    // +0x58/+0x5c red lines, x 0.10471976; throttle ratios x 0.01 [CODE].
+    out.BlueLineSport = dbI( "_blue_line_sport", dbI( "_blue_line", 6000 ) ) * kRpmToRads;
+    out.RedLineSport = dbI( "_red_line_sport", dbI( "_red_line", 7000 ) ) * kRpmToRads;
+    out.ThrottleRatioNormal = dbI( "_throttle_ratio_normal", 50 ) * 0.01f;
+    out.ThrottleRatioSport = dbI( "_throttle_ratio_sport", 90 ) * 0.01f;
 
     // Gearbox and differential.
     out.Gears.clear();
@@ -408,6 +414,8 @@ bool LoadVehicleSetup( const std::string &carFileName, VehicleSetup &out ) {
         fallback.Points = { { 0.0f, 0.4f }, { 400.0f * kKmhToMs, 2.0f } };
         out.AngularDamping = ReadIniCurve( *pIni, pDamping[out.AidLevel], fallback, 1.0f );
         const bool bOffRoad = car["_isoffroad"].asInt( 0 ) != 0;
+        // FUN_00bdb970: off-road cars OffRoadAngularDamping, others SecureAngularDamping again [CODE].
+        out.OffRoadAngularDamping = bOffRoad ? ReadIniCurve( *pIni, "OffRoadAngularDamping", out.AngularDamping, 1.0f ) : out.AngularDamping;
         fallback.Points = { { 0.0f, 0.0f } };
         out.DirtLinearDamping = ReadIniCurve( *pIni, bOffRoad ? "OffRoadDirtLinearDamping" : "NotOffRoadDirtLinearDamping", fallback, 1.0f );
         out.GrassLinearDamping =
@@ -472,6 +480,12 @@ bool LoadVehicleSetup( const std::string &carFileName, VehicleSetup &out ) {
         out.MaxPosition = Max( out.MaxPosition, out.IdlePosition + 1e-5f );
     }
 
+    OTDU_LOG_INFO( "Vehicle '%s': lines blue %.0f / %.0f red %.0f / %.0f rpm (normal / sport), throttle ratios %.2f / %.2f, "
+                   "shift %.2f / %.2f s, limiter %.2f s, rpm idle %.0f max %.0f, ABS %d TC %d act %.1f / %.1f m/s, diff bias %.2f\n",
+                   out.Db.FileName.c_str(), out.BlueLine * 9.549297f, out.BlueLineSport * 9.549297f, out.RedLine * 9.549297f,
+                   out.RedLineSport * 9.549297f, out.ThrottleRatioNormal, out.ThrottleRatioSport, out.ShiftTimeUp, out.ShiftTimeDown,
+                   out.LimiterTime, out.IdleVelocity * 9.549297f, out.EngineMaxVelocity * 9.549297f, out.bAbs ? 1 : 0,
+                   out.bTractionControl ? 1 : 0, out.AbsActivation, out.TractionActivation, out.DifferentialMaxTorqueBias );
     OTDU_LOG_INFO( "Vehicle '%s': %.0f kg, size %.3f %.3f %.3f, I %.0f %.0f %.0f, CG h %.2f front %.2f, axle %.3f wb %.3f, "
                    "tyre r %.4f (%s), mu %.2f/%.2f, k %.0f/%.0f, c %.0f/%.0f, stops %.3f..%.3f, %zu gears final %.2f, "
                    "idle pos %.3f, aero %.3f/%.3f/%.3f LDR %.2f, aids %u\n",

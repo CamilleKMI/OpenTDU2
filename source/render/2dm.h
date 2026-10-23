@@ -23,6 +23,12 @@
 struct MaterialTextureSlot {
     uint64_t SlotType = 0;
     uint64_t TextureHashcode = 0;
+    // Slot +0x18 / +0x19: texture addressing U / V, D3DTADDRESS numbering
+    // (1 wrap, 2 mirror, 3 clamp) [DATA: 1, 2, 3 all used; ocean runtime
+    // material FUN_008be1e0 writes 1 for a world-tiled map, 3 for a projected
+    // one (ocean_fix_spec)]; 0 = not set.
+    uint8_t AddressU = 0;
+    uint8_t AddressV = 0;
 };
 
 struct MaterialDesc {

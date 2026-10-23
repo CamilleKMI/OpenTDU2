@@ -273,6 +273,38 @@ Use the `.avt` c643 floats directly as COLOR. The UVOFF atlas stays [UNK]: keep 
     exists.
   - **avatar_spec §6.3 is wrong** on this point.
 
+### 1.7 Texture addressing of the 2DM slots: the face artefacts [DATA + INF; fixed in OpenTDU2]
+
+2DM texture slot (0x20 bytes at MAT+0x100+0x20·i): +0x00 slot type, +0x08 texture hash, **+0x18 address U,
++0x19 address V** (D3DTADDRESS numbering: 1 wrap, 2 mirror, 3 clamp), +0x1a 1. Values 1, 2 and 3 all occur
+(sector-5-0-6-7 + avatar banks: (1,1) 95, (2,2) 80, (1,2) 26, (2,1) 18, (3,3) 12, (1,3) 8, (3,2) 3, (3,1) 1);
+the ocean runtime material writes 1 for a world-tiled map and 3 for a projected one [CODE FUN_008be1e0,
+ocean_fix_spec] [INF: D3D numbering]. Before this fix OpenTDU2 sampled every 2DM texture with linear **wrap**.
+
+Avatar slots [DATA]: TD_Skinface / TD_Skin2 SKIN, NORMAL, LUT (COLOR_*), G, N2, MASK1/2 = (2,2) mirror, DETAIL
+(NOISE, tiled by UVSCALE) = (1,1); TD_Avatar EYEBROW atlas / lashes = (2,2); hair layers A–D / Key = (2,1)
+(strands tiled along v); `implant_front_n` = (1,2), `implant_casque` = (1,1).
+
+1. **Grey / pale flat patch on one side of the face (Tess, the male candidates) = LUT addressing.**
+   The skin shaders index the scattering LUT with `u = wrap·s`, `wrap = (N·L + DiffWrap)/(1 + DiffWrap) + rim`
+   (§1.2), which is **negative on the side turned away from the sun**. With wrap addressing a slightly negative u
+   reads the bright right end of the 256-texel LUT row: a flat, light, pinkish-grey region whose border (u = 0)
+   follows the normal-map noise (hard, jagged edge). The game's mirror addressing (slot 3 = (2,2)) reads the dark
+   start of the row. The region does not depend on FaceFX, shadows (checked with `-noshadows`), the facial bones
+   (checked with the 42 facial bones forced to bind) nor the second OCC_HEAD primitive (checked by not drawing it:
+   the patch is in the first one).
+2. **"Hair on the forehead" of the male candidate 1 (AVT_Male_Intro, hair M_HR_R_Groom) = `implant_front_n`.**
+   That TD_Hair shell (57 vertices, 3DD material 7) covers the forehead hairline with v ∈ [0.13, 1.30] on
+   `hair_implant_front_nuque.2db` (256², DXT5, alpha = hairline). Its V is mirror: v > 1 reads the transparent
+   bottom rows again. With wrap, v > 1 jumped to the opaque top of the texture: a black band with the widow's peak
+   shape just above the eyebrows. Hiding the implant materials removes the band; hiding EYEBROW does not; forcing the
+   facial bones to bind does not (so not FaceFX, not a bone) [EXP]. Offline renders: `implant_front_bind.png` (wrap),
+   `implant_front_bind_mirrorV.png` (mirror) in `/tmp/claude-0/-home-claude/44d890d5-0ce4-567e-a88c-c2f12ec3a4a4/scratchpad/face2/`.
+
+OpenTDU2: `MaterialTextureSlot::AddressU/V` (2dm.cpp), sampler heap `SH_LinearUV + 3u + v` (wrap / mirror /
+clamp per axis, `RenderDevice::getSampler(filter, u, v)`), set per slot in `EdenRenderer::setupMaterial`
+(renderer-wide; slots with 0 keep wrap; explicit overrides — shadows, ocean, post-fx, TD_backwash — are unchanged).
+
 ---------------------------------------------------------------------------------------------------
 ## 2. Body-zone hiding
 
@@ -516,10 +548,14 @@ Visible result:
 - per-avatar LUT rows (ScatteringCoeff 0.4–1.0);
 - weaker specular and rim on all avatars (0.15 / 0.1 instead of 0.3 / 0.7).
 
-### 3.4 Eyebrows (optional)
+### 3.4 Eyebrows (implemented)
 
-For the TD_Avatar material with `Hashcode == id64("EYEBROW")`, set `COLOR = EyebrowsColor` (the `.avt` floats; the
-game converts them to bytes and back by ×1/255). Keep the 2DM UVOFF until the EyebrowsID atlas is decoded.
+For the TD_Avatar material with `Hashcode == id64("EYEBROW")`, `COLOR = EyebrowsColor` (`EdenAvatar::applySkin`).
+FUN_00cbd030 stores R, G, B (+0x5c..+0x5e; +0x5f is not written there) — a u8 file value as is, any other type
+through 0x5bbd30 [ENC]; the `.avt` files hold f32 (AVT_Male: (0, 0, 0, 1) = black). OpenTDU2: ×255 rounded [INF],
+then ×0.0039215 (FUN_00cb1830). TD_Avatar ps 4–7 (S_USERTYPE1, the EYEBROW permutation) output alpha = tex.r: the
+atlas `eyebrows_male/female.2db` is an opaque DXT1 whose red channel is the brow mask (2 × 4 cells of 256 × 64).
+The 2DM UVOFF (0, 0) is kept (cell 0) until the EyebrowsID atlas table ([ENC]) is known.
 
 ### 3.5 Corrections to fold into avatar_spec.md
 

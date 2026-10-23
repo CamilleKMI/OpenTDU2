@@ -83,6 +83,8 @@ void Render2DM::parseMaterial( const uint8_t *pPayload, uint32_t payloadSize ) {
         MaterialTextureSlot slot;
         slot.SlotType = ReadAt<uint64_t>( pSlot, 0 );
         slot.TextureHashcode = ReadAt<uint64_t>( pSlot, 8 );
+        slot.AddressU = pSlot[0x18];
+        slot.AddressV = pSlot[0x19];
         if ( i < numSlots ) {
             material.AllTextures.push_back( slot );
         }

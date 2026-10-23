@@ -110,20 +110,34 @@ struct VehicleSetup {
     float EngineMaxVelocity = 890.0f;  // _rpm_max (rad/s)
     float IdlePosition = 0.1f;         // -Tno(idle) / (Tmax(idle) - Tno(idle))
     float MaxPosition = 1.0f;
-    float LimiterTime = 0.05f;         // _rupteur_time
-    float StartingTime = 0.5f;         // _time_ignition
+    float LimiterTime = 0.09f;         // _rupteur_time (controller +0x30, ctor 0.09)
+    float StartingTime = 0.65f;        // _time_ignition (controller +0x28, ctor 0.65)
+    float StallingTime = 0.3f;         // controller +0x2c (ctor DAT_00ede42c, not set by the factory)
+    // Game car object (FUN_00baddd0 / FUN_00bacd50): normal / sport lines and
+    // the throttle hysteresis switching them.
+    float BlueLineSport = 650.0f;      // _blue_line_sport (rad/s)
+    float RedLineSport = 840.0f;       // _red_line_sport (rad/s)
+    float ThrottleRatioNormal = 0.5f;  // _throttle_ratio_normal x 0.01
+    float ThrottleRatioSport = 0.9f;   // _throttle_ratio_sport x 0.01
+    // Clutch part (gearbox +0x10, ctor FUN_00877ca0; not set by the factory):
+    // MaxAction 10000, PartInertiaArray 0.001 / 0.001, controller
+    // EngagingTime 0.2, DisengagingTime 0 [CODE ctor values].
+    float ClutchMaxAction = 10000.0f;
+    float ClutchPartInertia = 0.001f;
+    float ClutchEngagingTime = 0.2f;
+    float ClutchDisengagingTime = 0.0f;
 
     // Gearbox (edVehicle + 0x9f0, GearRatioArray[10]: R = -1st, N, 1st.., then 1.0).
     std::vector<float> Gears;          // forward ratios
     float ReverseRatio = 3.0f;         // _gear_ratio1 (index 0 = -ratio)
     float FinalDrive = 4.0f;           // differential GearRatio (+0x100) = _final_drive_ratio
-    float DifferentialMaxTorqueBias = 0.0f; // _differential_value_xx x 0.01 (+0x120)
+    float DifferentialMaxTorqueBias = 0.7f; // _differential_value_xx x 0.01 (+0x120, ctor 0.7)
     bool bDifferentialLocked = false;  // _differential_type_xx == 3 (flag +0x144)
     float ShiftTimeUp = 0.1f, ShiftTimeDown = 0.1f; // _shifttime_up / _down (gearbox controller +0x30 / +0x2c)
     float ReverseTime = 0.6f;          // Physics.cpr ReverseTime (controller +0x34)
     float GearboxInertia = 0.0f;       // _gearbox_inertia x 0.01
     float GearboxDamping = 0.0f;       // _gearbox_damping
-    float PowerRpm = 7000.0f;          // _power_rpm (shift rule [INF])
+    float PowerRpm = 7000.0f;          // _power_rpm (not used by the edVehicle shift rule, which uses the red / blue lines)
 
     // Brakes (edVehicle +0xe08 / +0xe0c).
     float MaxBrakingAction = 10000.0f; // _brakes_power_front (N m, whole car)
@@ -159,9 +173,10 @@ struct VehicleSetup {
 
     // Chassis damping / world (edVehicle + 0x4e0 .. + 0x570, WorldConfig).
     VehicleCurve AngularDamping;       // CurveAngularDamping (m/s -> 1/s)
+    VehicleCurve OffRoadAngularDamping; // CurveOffRoadAngularDamping (= SecureAngularDamping for road cars)
     VehicleCurve DirtLinearDamping;    // CurveOffRoadDirtLinearDamping
     VehicleCurve GrassLinearDamping;   // CurveOffRoadGrassLinearDamping
-    int32_t Substeps = 3;              // NbLoopForMiddlePrecision [INF use]
+    int32_t Substeps = 3;              // NbLoopForMiddlePrecision = DriveTrainSubStepCount (FUN_00baa810) [CODE]
     float ExtraGravityMin = 0.1f;
     float ExtraGravityMax = 1.0f;
     float ExtraGravityAccelDuration = 0.1f;

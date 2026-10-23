@@ -47,6 +47,12 @@ public:
     inline bool isLoaded() const { return pSkeleton != nullptr; }
     inline const EdenSkeleton &getSkeleton() const { return *pSkeleton; }
     inline bool isWoman() const { return bWoman; }
+    // .avt FaceParamArray (key 9d93, 49 signed bytes, struct +0xa2; the
+    // FaceFX customisation registers, docs/re/facefx_spec.md).
+    inline const int8_t *getFaceParams() const { return faceParams; }
+    // TD_Skinface facialAnimCoef1 / facialAnimCoef2 (FaceFX normal map
+    // weights, FUN_00caf700).
+    void setFacialCoefficients( const Vector4f &coef1, const Vector4f &coef2 );
 
     // skinMatrices: EdenSkeleton::computeSkinMatrices of the current pose.
     void draw( EdenRenderer &renderer, const Matrix4x4f &world, const std::vector<Matrix4x4f> &skinMatrices,
@@ -57,6 +63,7 @@ private:
     bool bWoman = false;
     std::vector<std::unique_ptr<EdenModel>> parts;
     std::vector<size_t> headParts; // head mesh and the clothes worn on it
+    int8_t faceParams[49] = {};
 
     // FUN_00cbe2a0 / FUN_00cbe1a0 / FUN_00cbe220: .avt skin values into the
     // TD_Skin2 / TD_Skinface materials (docs/re/skin_zones_spec.md).

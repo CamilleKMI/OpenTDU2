@@ -14,6 +14,7 @@ enum class eGameMode : int32_t {
     GM_CinViewer,     // "CINVIEWER"
     GM_TestCar,       // "TESTCAR"
     GM_FirstWalkMode, // "FIRST_WM" (0x23): story step 1 "First Garage" (garage.bnk)
+    GM_WorldViewer,   // "WORLD_VIEWER": OpenTDU2 developer tool (free-fly camera over an island), not a TDU2 mode
 
     GM_Count
 };
@@ -40,6 +41,8 @@ public:
     virtual void draw() = 0;
     virtual void exit() {}
     virtual void drawDebug() {}
+    // ImGui drawn every frame (not only with the F1 debug UI): tool panels.
+    virtual void drawUI() {}
 
 protected:
     eGameMode gameMode;

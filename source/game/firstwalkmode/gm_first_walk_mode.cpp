@@ -22,24 +22,46 @@ const char *kVoices[4] = { "C_VOICE_03", "C_VOICE_04", "C_VOICE_05", "C_VOICE_06
 // 'opdo' / 'stca'; their classes are encrypted [ENC]).
 const char *kTutorials[2] = { "opdo", "stca" };
 constexpr float kDoorDuration = 2.0f;      // DAT_00eddb40 (FUN_009a9c4e opdo)
-constexpr float kReticleRayLength = 50.0f; // FUN_00952410
+constexpr float kReticleRayLength = 50.0f; // FUN_00952410 /cursor depth ray (DAT_00f4a040)
 
 std::string LocString( uint32_t id ) {
     const char *pText = gpDatabase != nullptr ? gpDatabase->getString( static_cast<int32_t>( id ) ) : nullptr;
     return pText != nullptr ? pText : "";
 }
 
-// Default_KB.xmb (PlayerKeyMapFile.KeyMap[]): ActionName -> ChannelName /
-// ChannelLocName of the first single key binding.
+// Default_KB.xmb (PlayerKeyMapFile.KeyMap[]): ActionName -> its single key
+// bindings {ChannelName, ChannelLocName} in file order (a ChannelNameAND
+// combo keeps its ChannelLocName, e.g. "MAJ + F1"; it is not a key press).
 struct KeyBinding {
     std::string Channel;
     std::string LocName;
 };
-const std::unordered_map<std::string, KeyBinding> &KeyMap() {
-    static std::unordered_map<std::string, KeyBinding> map;
+// OpenTDU2 user-requested bindings (NOT game data): put before the
+// Default_KB.xmb entries of the same action, so the #command: tip shows them
+// (FUN_00d87cc0 takes the first entry of the action); the Default_KB keys
+// keep working.
+// - ACCESSORIES_LEFT (open the car door, Default_KB PAD_4 "4 (PAVE NUM.)")
+//   also on the main-row 4 key, for keyboards without a numpad (Mac). The
+//   channel / loc names follow the game's own main-row digit entries:
+//   channel table at 0x00f73b08 (32-byte names indexed by DirectInput key
+//   code, DIK_4 = 5 -> "4") [DATA], and Default_KB RADIO_CHANNEL /
+//   RADIO_VOL_LESS / RADIO_VOL_MORE = "1" / "2" / "3" with ChannelLocName
+//   "1" / "2" / "3" [DATA]. No Default_KB.xmb action uses the main-row "4".
+struct UserBinding {
+    const char *pAction;
+    const char *pChannel;
+    const char *pLocName;
+};
+constexpr UserBinding kUserBindings[] = { { "ACCESSORIES_LEFT", "4", "4" } };
+
+const std::unordered_map<std::string, std::vector<KeyBinding>> &KeyMap() {
+    static std::unordered_map<std::string, std::vector<KeyBinding>> map;
     static bool bLoaded = false;
     if ( !bLoaded ) {
         bLoaded = true;
+        for ( const UserBinding &user : kUserBindings ) {
+            map[user.pAction].push_back( KeyBinding{ user.pChannel, user.pLocName } );
+        }
         XmbDocument document;
         if ( LoadXmbFromFile( "Default_KB.xmb", document ) ) {
             XmbValue root = document.getRoot();
@@ -47,16 +69,13 @@ const std::unordered_map<std::string, KeyBinding> &KeyMap() {
                 XmbValue key = root.getArrayElement( "KeyMap", i );
                 const std::string action = key["ActionName"].asString();
                 const std::string channel = key["ChannelName"].asString();
-                if ( channel.empty() || map.count( action ) != 0 ) {
+                if ( channel.empty() ) {
                     continue;
                 }
                 KeyBinding binding;
                 binding.Channel = channel;
                 binding.LocName = key["ChannelLocName"].asString();
-                if ( !key["ChannelNameAND"].asString().empty() ) {
-                    binding.LocName = key["ChannelLocName"].asString();
-                }
-                map[action] = binding;
+                map[action].push_back( binding );
             }
         }
     }
@@ -64,22 +83,22 @@ const std::unordered_map<std::string, KeyBinding> &KeyMap() {
 }
 
 // '#command:<ACTION>#' (FUN_00d87cc0): keyboard form
-// "#color:ff6600#[<key name>]#endcolor#" (format 0x00ee6370, written with the
-// key map entry +0x6c for LEFT_PAD / RIGHT_PAD [CODE]; the general case calls
-// the encrypted thunk PTR_00e4141c [ENC]: same form with ChannelLocName
-// [INF]). The X360 pad form "#bitmap:x360_..#" (BUTTON_n / STICK_0_x / dpad
+// "#color:ff6600#[<ChannelLocName>]#endcolor#" of the first key map entry
+// of the action (docs/re/text_icons_spec.md 1 [CODE]). The X360 pad form "#bitmap:x360_..#" (BUTTON_n / STICK_0_x / dpad
 // table at 0x00d87930) is not drawn by the flash player: keyboard only.
 std::string ResolveCommand( const std::string &action ) {
     const auto &map = KeyMap();
     auto it = map.find( action );
-    if ( it == map.end() ) {
+    if ( it == map.end() || it->second.empty() ) {
         return "";
     }
-    const std::string &name = it->second.LocName.empty() ? it->second.Channel : it->second.LocName;
+    const KeyBinding &binding = it->second.front();
+    const std::string &name = binding.LocName.empty() ? binding.Channel : binding.LocName;
     return "#color:ff6600#[" + name + "]#endcolor#";
 }
 
-// Default_KB channel -> SDL scancode (the channels used by ACCESSORIES_*).
+// Default_KB channel -> SDL scancode (the channels used by ACCESSORIES_* and
+// the main-row digits; SDL scancodes are key positions, like DIK codes).
 SDL_Scancode ChannelScancode( const std::string &channel ) {
     if ( channel.size() == 5 && channel.compare( 0, 4, "PAD_" ) == 0 && channel[4] >= '0' && channel[4] <= '9' ) {
         return channel[4] == '0' ? SDL_SCANCODE_KP_0
@@ -87,6 +106,9 @@ SDL_Scancode ChannelScancode( const std::string &channel ) {
     }
     if ( channel.size() == 1 && channel[0] >= 'A' && channel[0] <= 'Z' ) {
         return static_cast<SDL_Scancode>( SDL_SCANCODE_A + ( channel[0] - 'A' ) );
+    }
+    if ( channel.size() == 1 && channel[0] >= '0' && channel[0] <= '9' ) {
+        return channel[0] == '0' ? SDL_SCANCODE_0 : static_cast<SDL_Scancode>( SDL_SCANCODE_1 + ( channel[0] - '1' ) );
     }
     return SDL_SCANCODE_UNKNOWN;
 }
@@ -409,14 +431,18 @@ bool GMFirstWalkMode::aimingAtCar() const {
 
 bool GMFirstWalkMode::wasAccessoriesLeftPressed() const {
     // ACCESSORIES_LEFT (input 0x34 [INF from its uses next to 0x35..0x37]):
-    // Default_KB.xmb key (PAD_4) or the pad d-pad left (IA_MenuLeft, not the
+    // Default_KB.xmb key (PAD_4), the OpenTDU2 main-row 4, or the pad d-pad left (IA_MenuLeft, not the
     // arrow key that also strafes: AVT_MOVE_LEFT).
+    // Every binding of the action: Default_KB PAD_4 and the OpenTDU2
+    // main-row 4 (kUserBindings).
     const auto &map = KeyMap();
     auto it = map.find( "ACCESSORIES_LEFT" );
     if ( it != map.end() ) {
-        const SDL_Scancode scancode = ChannelScancode( it->second.Channel );
-        if ( scancode != SDL_SCANCODE_UNKNOWN && gpInput->wasKeyPressed( scancode ) ) {
-            return true;
+        for ( const KeyBinding &binding : it->second ) {
+            const SDL_Scancode scancode = ChannelScancode( binding.Channel );
+            if ( scancode != SDL_SCANCODE_UNKNOWN && gpInput->wasKeyPressed( scancode ) ) {
+                return true;
+            }
         }
     }
     return gpInput->wasPressed( eInputAction::IA_MenuLeft ) && !gpInput->isDown( eInputAction::IA_AvatarLeft );

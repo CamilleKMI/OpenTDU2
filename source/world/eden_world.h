@@ -42,6 +42,15 @@ public:
 
     // Loads (synchronously) the sectors around a position and every area.
     void loadAround( const Vector3f &position, int32_t sectorRadius );
+    // Unloads the sectors farther than sectorRadius (sector rows / columns)
+    // from a position; returns the number of sectors unloaded. The caller
+    // must drop the renderer material caches (clearShadowCasterCache).
+    uint32_t unloadFar( const Vector3f &position, int32_t sectorRadius );
+    // Island level heightfield (<island>.bnk <island>.3dd/.3dg/.2dm, 257 x
+    // 257 heights, 384 m spacing: HMAP center 49152 = 128 x 384 [DATA],
+    // TD_HeightMap S_USERTYPE4 = 2), drawn where no area is loaded. Off by
+    // default (the world viewer turns it on).
+    inline void setIslandTerrainEnabled( bool bEnable ) { bIslandTerrainEnabled = bEnable; }
     void draw( EdenRenderer &renderer, const Vector3f &cameraPosition );
     // Small instance culling (size / distance below the ratio are skipped):
     // low resolution passes (environment cube faces). 0: off.
@@ -64,8 +73,8 @@ public:
     void updateWetGround( EdenRenderer &renderer, const struct WeatherPreset *pWeather, GPUTexture *pEnvironmentCube,
                           float deltaTime );
 
-    SectorId getSectorAt( const Vector3f &position ) const;
-    Vector3f getSectorOrigin( const SectorId &id ) const;
+    static SectorId getSectorAt( const Vector3f &position );
+    static Vector3f getSectorOrigin( const SectorId &id );
     // Heightfield sampling (loaded sectors only), returns false outside.
     bool getHeight( float x, float z, float &outHeight ) const;
     // Highest surface (heightfield or sector objects: roads...) below
@@ -73,6 +82,15 @@ public:
     bool getSurfaceHeight( float x, float z, float maxHeight, float &outHeight ) const;
 
     inline const Render2DM &getLibraryMaterials() const { return libraryMaterials; }
+    inline int32_t getAreaColumns() const { return areaColumns; }
+    inline int32_t getAreaRows() const { return areaRows; }
+    inline size_t getNumSectors() const { return sectors.size(); }
+    inline size_t getNumAreas() const { return areas.size(); }
+    inline size_t getNumFailedSectors() const { return failedSectors.size(); }
+    inline bool hasIslandTerrain() const { return !islandTerrain.Materials.empty(); }
+    // Sector bank path (<level>/area-x/area-x-y/sector-x-y-sx-sy.bnk).
+    std::string getSectorBankPath( const SectorId &id ) const;
+    static std::string GetSectorBankPath( const char *pIsland, const SectorId &id );
     inline const Bank &getCommonBank() const { return commonBank; }
 
 private:
@@ -135,6 +153,13 @@ private:
     // horizon) and its colour map.
     Bank islandBank;
     EdenModel islandOcean;
+    Heightfield islandTerrain;
+    GPUBuffer *pIslandIndexBuffer = nullptr; // quads not covered by loaded areas
+    uint32_t numIslandIndices = 0;
+    bool bIslandIndicesDirty = true;
+    bool bIslandTerrainEnabled = false;
+    void updateIslandIndices();
+    bool loadWorldConfig( const char *pIsland );
     GPUTexture *pIslandColorMap = nullptr;
     bool bOceanVisibilityDirty = true;
     bool bOceanVisible = true;
@@ -153,6 +178,7 @@ private:
     bool loadSector( const SectorId &id );
     bool loadArea( int32_t x, int32_t y );
     void updateAreaIndices( Area &area );
+    void markAreasDirty( const SectorId &id );
     bool isSectorLoaded( const SectorId &id ) const;
     void loadInstances( Sector &sector, const std::string &name );
     int32_t getActorModel( uint64_t hashcode );

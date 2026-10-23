@@ -49,7 +49,8 @@ Physics.cpr / GEO names), `build.asm` (bike factory FUN_00bd8140), `d1.c`..`d4.c
   / +0x510, CurveAngularDamping +0x540, CurveOffRoadAngularDamping +0x570, TrackWidthArray +0xe00, MaxBrakingAction
   +0xe08, BrakingBalance +0xe0c, WheelBase +0xe10, FrontAxleLocalPos +0xe14, LoadDistribution +0xe18).
 - It is a constraint/impulse multibody solver (ContactNormal/TangentialConstraint, MaxImpulse, ErrorImpulse,
-  RK4 drive train). That solver is not reimplemented (§5).
+  RK4 drive train). Its step, drive train, controllers and aids are decoded in §5 - §6; the chassis / contact
+  constraint core is in the SecuROM range (§6.8).
 - Several CRT math stubs it calls are encrypted [ENC]: 0x6c8d38 (used as sin), 0x541080 (atan), 0x403620 (fabs),
   0x448620 (sqrt), 0xe2db8a = `jmp [0xe414e4]` (exp), FUN_004774a0 (curve interpolation), FUN_0053f600 (curve add
   point), vfunc 0x9c of the vehicle = 0x544400 (mass + size -> inertia), vfunc 0xf4 = 0x544920 (centre of mass).
@@ -189,7 +190,7 @@ _vehiclecategory 0x12 / 0x13 / 0x16), then the upgrade post set-up of FUN_00badd
 - Aids (+0x1098): VelocityActivations = Abs/HandBrake/TractionControlActivation / 3.6; curves (VelocityMin/3.6,
   Physics.cpr SECURE column) -> (VelocityMax/3.6, DB _xx_secure) for ABS (-0.2 -> -0.08), hand brake (-0.4 ->
   _hand_brake_slip_ratio -0.2), traction control (0.5 -> 0.1); SlipRatios = the DB values. The SPORT / HYPERSPORT
-  columns are used by a later aid switch that was not found [INF].
+  columns: the game replaces the ABS curve end point by the aid level (§6.6); the level itself was not found [INF].
 - Steering (+0x109c): feedback parameters (Power/BasicSteeringFeedbackFriction by _haspowersteering,
   SteeringFeedbackSpring), CurveMaxVelocity = SteeringVelocity (deg -> rad), CurveMaxAngle = SteeringMaxAngle,
   CurveSensitivity.
@@ -236,44 +237,228 @@ v_t = point velocity minus its component along the spoiler normal n; L = -0.592 
 |v_t|)). So at lift_velocity the spoiler pushes lift_load x g down and drags lift_load x g / lift_drag_ratio.
 
 ---------------------------------------------------------------------------------------------------
-## 5. OpenTDU2 implementation (`source/physics/vehicle_data.*`, `vehicle_dynamics.*`)
-Decoded values / laws used: all of §3 (GEO, suspension stops / rates / dampers / anti-roll, DBRims radius 0.3393,
-tyre friction arrays, Tires.bnk Pacejka, engine curves + torque_nm scaling + IdlePosition, engine / gearbox inertia,
-engine damping, rpm limits, reverse = -1st, final drive, shift times, MaxBrakingAction / BrakingBalance, aid curves,
-steering curves, SecureAngularDamping, aero coefficients, spoilers drag through LiftDragRatio, no _cx) and §4.2 /
-§4.3 formulas (fast atan, float constants).
-[INF] (solver not reimplemented): raycast wheels with semi-implicit Euler chassis (3 sub steps); spring law k (x -
-LowerStop) (zero at full droop: k |LowerStop| equals the static wheel load of the DB cars, California 4000 / 4500 N);
-slip definitions (wR - v) / max(|v|, 1 m/s) and atan(vy / max(|vx|, 1)); wheel inertia 1/2 m r^2 plus the engine
-and gearbox inertia x ratio^2 on the driven wheels; open differential (equal split); engine torque Tno + position
-(Tmax - Tno), position = IdlePosition + pedal (MaxPosition - IdlePosition), damping torque -_engine_damping x w;
-limiter cut for LimiterTime at the red line; automatic shift points (power rpm), launch clutch; brake torque split
-half per wheel; ABS / TCS regulation (torque cut against the decoded slip-ratio limits); aero anchors at the axles;
-grass = heightfield; box inertia m/12 (..) of the GEO size (edVehicle 0x544400 [ENC]); centre of mass height =
-hub line + 0.18; rolling resistance 0.015; sin / atan / exp of the CRT stubs.
-Debug: `-vehtest` (flat road plane, friction 0.7): 0-100 / 0-200 / 402 m / top speed / 100-0 runs logged as
-`VEHTEST`; `-aids sport|hypersport` selects the other aid columns.
+## 5. edVehicle object layout (RWD car, vtable 0xf39e80, 0x1200 bytes) [CODE]
+Read from the constructors FUN_0088c9d0 (RWD), FUN_0086dbb0 (4-wheel base), FUN_0087d4a0 (vehicle), FUN_00888d90
+(engine), FUN_00884a00 (gearbox), FUN_00877ca0 (clutch), FUN_00882ea0 (differential), FUN_0086fca0 (wheel axle) and
+the serializers (`fields*.txt`). Work files: `/tmp/claude-0/vs/` (`all_va.c` decompiles of every vtable entry of
+the vehicle / wheel / part / controller classes plus callees, constants annotated; `notes.md`).
 
-### 5.1 Measurements (California, `-vehtest`, 60 Hz)
-| | before (approximation) | after (decoded set-up) | DB |
+| object | where | vtable | content |
 |---|---|---|---|
-| 0-100 km/h | 4.42 s | **4.08 s** | _acceleration_0_100_kmh 4.1 |
-| 0-200 km/h | 13.22 s | 13.10 s | - |
-| top speed | 315.0 km/h | **312.4 km/h** (7th gear at 7750 rpm = _power_rpm) | _max_theorical_speed 310 |
-| 100-0 km/h | 40.5 m | 28.8 m | _braking_100_0 100, _brakingdist 60 (units not known) |
+| vehicle | car +0 | 0xf39e80 (base 4 wheels 0xf3af48, vehicle 0xf396e8) | SubStepCount +0x5a0, TimeStep +0x5a4, Frequency +0x5a8, DriveTrainRk4Step +0x5b0, DriveTrainSubStepCount +0x5b4, DriveTrainTimeStepArray +0x5b8 [4], FrequencyArray +0x5c8 [4], Mode +0x5d8, ConfigType +0x5dc, CurrentContext +0x5e0, damping curves +0x4e0..+0x570, LinearDampingOffset +0x4d0 |
+| engine E | car +0x8e0 | 0xf394f8 | curves Starter +0x10 / NoThrottle +0x40 / MaxThrottle +0x70, gearbox G at E+0x110, DriveShaft end +0x350 (inertia +0x360, velocity +0x368, connection +0x37c, combined inv. inertia +0x38c), Position +0x390, PreviousCurveAction +0x394, Idle / Blue / Red / Max velocity +0x398..+0x3a4, engine controller at +0x3b0 (Flags +0x3c4, gearbox controller ptr +0x3c8, EngineState +0x3cc (1 at ctor), StarterState +0x3d0, ElapsedTime +0x3d4, StartingTime +0x3d8 (0.65), StallingTime +0x3dc (0.3), LimiterTime +0x3e0 (0.09), PedalPosition +0x3e4, Position +0x3e8, IdlePosition +0x3ec, MaxPosition +0x3f0) |
+| gearbox G | car +0x9f0 | 0xf39558 | clutch C at G+0x10, input end +0xd0, output end +0xf0 (connection +0x11c = differential input), engine ptr +0x130, gear index +0x134, GearInertiaArray +0x138, RatioArray +0x144, GearRatioArray +0x14c [10] / Inv / Sqr / InvSqr, gearbox controller at +0x1f0 (Flags +0x14, clutch controller +0x18, Type +0x1c, Mode +0x20, State +0x24, ElapsedTime +0x28, ShiftTimeDown +0x2c, ShiftTimeUp +0x30, ReverseTime +0x34, DriveTime +0x38, MinGearRatio +0x3c, MaxGearRatio +0x40, GearRatio +0x44, ShiftedGearRatio +0x48; ctor 0.15 / 0.15 / 0.6 / 0.5, 0..7, gear 1) |
+| clutch C | car +0xa00 | 0xf39498 | input end +0x10 (connection +0x2c = engine DriveShaft), output end +0x30 (connection +0x5c = gearbox input), PartInertiaArray +0x74 (0.001, 0.001), Position +0x7c, MaxAction +0x80 (10000), DegreeOfFreedom +0x84 (slip coefficient), clutch controller at +0x90 (Type +0x14 = 0, State +0x18, ElapsedTime +0x1c, EngagingTime +0x20 = 0.2, DisengagingTime +0x24 = 0, Position +0x28) |
+| spoilers | car +0xcf0 / +0xd40 / +0xd90 | | front spoiler, ground effect, rear spoiler (0x50 each) |
+| wheels | car +0xce0..+0xcec | 0xf3abb8 | 0x970 bytes each: Tire +0x270, WheelJoint +0x580 (anchor +0x5a0, LoadDistributionAtRest +0x61c), suspension +0x640 (Force +0x6a8, ForceAtRest +0x6b0, flags +0x6d0 bit0 = no contact, stabilizer +0x6f4.., Lower/UpperStop +0x708/+0x70c, partner suspension +0x720), axle part +0x7b0 (vtable 0xf3acc0: shaft end +0x10, connection +0x2c, wheel +0x30, Direction +0x34 (+-1), BrakingPosition +0x38, slip coefficient +0x3c, MaxBrakingAction +0x40, BrakingBalance +0x44, PartInertia +0x48), brake controller at axle +0x50 (vtable 0xf3ad44: Flags +0x14, BrakingPosition +0x1c, ForcedSlipRatio +0x20, SlipRatio +0x24, Velocity +0x28) |
+| differential D | car +0xe30 | 0xf399a8 | input end +0x10, first output +0x30 (<-> rear left axle), second output +0x70 (<-> rear right), inertia matrix +0xc8..+0xfc, GearRatioArray +0x100 (final drive), Distribution +0x118, Primacy +0x11c, MaxTorqueBias +0x120 (ctor 0.7), controller +0x130 (vtable 0xf39bc8, Flags only) |
+| aids | car +0xf80 | 0xf38fac | curves Abs +0x20 / HandBrake +0x50 / TractionControl +0x80, VelocityActivations +0xb0, SlipRatios +0xbc [3], PedalPreviousPosition +0xcc, PedalPosition +0xd0 (brake), Position +0xd4, Flags +0x10 (bit0 hold, bit2 ABS active, bit3 hand brake, 0x20 TC active) |
+| controls | car +0x1190 | 0xf39e38 | vfunc 0xfc / 0xf8 of the vehicle (ENC getter) return it; +8 aids, +0xc steering, state +0x28 |
 
-FREERIDE runs (`-startstopped -logdrive`): full throttle down the village street reaches 102 km/h in 3rd before the
-street bends (the car leaves the road and ends resting on its chassis spheres on the roadside, as the collision
-spheres are unchanged); throttle to 60 km/h then steering right: the car turns into the palm tree / planter on the
-right of the street, stops and stays upright on its wheels (`/tmp/claude-0/vp_turn.png`, `vp_drive.png`).
+Base 4-wheel ctor defaults: MaxBrakingAction 12000, BrakingBalance 0.6, WheelBase 2.468, FrontAxleLocalPos 1.188,
+LoadDistribution 0.56; per wheel brake MaxBrakingAction = car value x BrakingBalance (front) / x (1 - balance)
+(rear), recomputed by the pre-step when the car values change (flag bit 27 -> FUN_0086b750).
+Car hierarchy note: the RWD car overrides vfuncs 0x28 / 0x2c / 0x30 / 0x134 / 0x138 / 0x108 / 0x10c / 0x124 / 0x13c...
+with functions at 0x545xxx and the wheel class uses 0x54cxxx for vfuncs 0x28 / 0x2c / 0x30 / 0x54 / 0x58: **these
+are in the SecuROM range** [ENC].
 
 ---------------------------------------------------------------------------------------------------
-## 6. Open points
-- edVehicle solver step (constraint solver, RK4 drive train, clutch / differential / shift controllers, wheel
-  contact kinematics filling slip ratio / slip angle): not read in detail [INF in OpenTDU2].
-- vfunc 0x9c / 0xf4 (inertia, centre of mass), CRT stubs (sin, atan, exp, fabs, sqrt), curve interpolation
-  FUN_004774a0: [ENC].
-- Driving aid level switch at runtime (SPORT / HYPERSPORT columns), the player's default level: not found [INF].
-- Use of vehicle +0x1f0 (max theorical speed), spoiler DragCoefficient default, world Material (friction / damping
-  / RollingResistance per surface), aligning torque application: not read.
+## 6. The edVehicle step [CODE unless tagged]
+
+### 6.1 Frequency and sub steps
+- The physics service thread "PhysThread" (FUN_00bd07c0, started at 0xbe03f6) ticks at **90 Hz** (period =
+  counter frequency / DAT_00ede78c = 90.0); each tick FUN_00bd03a0 clamps the car dt to **1/90 s** (DAT_00f4a0b0)
+  and calls, per car, FUN_00bbc590(dt) -> FUN_00bacd50(physics car, dt, controls) (controls copied from game car
+  +0x380) -> manager vfunc 0xc (FUN_00880e60) -> **vehicle vfunc 0x58 FUN_0087b8a0(dt)**.
+- FUN_0087b8a0: vfunc 0x54 (car pre-step FUN_0086da40: FUN_0087d280, FUN_0086c2c0 wheel / spoiler anchors,
+  FUN_0086c0d0 LoadDistributionAtRest = LoadDistribution / 2 (front), (1 - LoadDistribution) / 2 (rear) and
+  ForceAtRest = share x mass x |g|, FUN_0086b750 brakes, FUN_0086b630), vfunc 0x48 setFrequency(1/dt)
+  (FUN_0087ada0 -> FUN_0087ac80), then Mode 0 -> FUN_0087b590, Mode 1 -> FUN_0087b050.
+- FUN_0087ac80: Frequency = SubStepCount x f, TimeStep = 1 / that; drive train frequency F = DriveTrainSubStepCount
+  x vfunc 0x44() [ENC getter, INF = Frequency]; **DriveTrainTimeStepArray = [1/F, 0.5/F, 0.5/F, 1/F]**,
+  FrequencyArray = [F, F/2, F/2, F].
+- **SubStepCount = 1** (vehicle ctor 0x87d672; no other writer), DriveTrainSubStepCount = 5 at ctor; the game car
+  state 7 (FUN_00baa810, normal driving) sets Mode 0 and **DriveTrainSubStepCount = Physics.cpr
+  NbLoopForMiddlePrecision** (+0x1c4, value 3); state 8 (FUN_00baa580) Mode 1 and 1 sub step.
+- FUN_0087b590 (Mode 0): if the world object (+0x260) vfunc 0x20 is false: per chassis sub step vfunc 0x30, vfunc
+  0x2c, FUN_0087aa70; otherwise FUN_00549640, FUN_00542930 [ENC], 0x30, 0x2c, 0x5c, FUN_0087aa70, 0x60, 0x64,
+  0x8c; then the steering column integration (controls +0xc object, +0xf0..+0x11c).
+- FUN_0087aa70 (drive train): for DriveTrainSubStepCount: controls vfunc 0x28; for stage 0..3: DriveTrainRk4Step
+  (+0x5b0) = stage, parts[i] vfunc 8, vehicle vfunc 0x198, 0x2c, 0x134, 0x138, parts[i] vfunc 0xc; then parts[i]
+  vfunc 0x10, vfunc 0x198. The part list (vfuncs 0x108 / 0x10c) and the stage vfuncs 0x198 / 0x134 / 0x138 are
+  [ENC]; the parts save / restore their state in vfuncs 0x28 / 0x2c (engine FUN_00887cd0 / FUN_00887ca0, axle
+  FUN_0086fb00 / FUN_008706c0): an RK4 of the drive train velocities whose combination is not readable.
+
+### 6.2 Drive train parts: impulses and shafts
+Every part has vfunc 0x40 (inertia update), 0x48 (impulses: calls the downstream part's 0x48 first through the
+connected shaft end's owner, then adds its own), 0x4c (apply), 0x54 (velocity propagation upwards) and 0x58
+(downwards). A shaft end holds Inertia (+0x10), Velocity (+0x18), Impulse (+0xc / +0x30), DampingArray[3]
+(+0x20, default [0, 0, 1e6]) and its combined inertia (+0x38, inverse +0x3c); the velocity of a connection is
+the momentum weighted mean (v1 I1 + v2 I2) / (I1 + I2) unless the "locked" flag (+8 bit1) is set.
+- Shaft damping FUN_008877e0: c = |v| > D2 ? D1 |v| : D0; impulse = -c v dt, clamped by FUN_00887400 so that it
+  never reverses the shaft (|J| <= |v I|). Engine D0 = `_engine_damping` (0.05), gearbox: `_gearbox_damping` on
+  the clutch output end.
+- **Engine torque FUN_008880f0**: EngineState 0: CurveActionStarter(w); 1 or 3: **T = P Tmax(w) + (1 - P) Tno(w)**
+  with P = engine Position (+0x390); other states: Tno(w). Tno(w) = min(CurveNoThrottle(w), -1e-5) (w >= 0, else
+  -1e-5, FUN_008880a0); Tmax(w) = max(CurveMax(Idle), CurveMax(w), 1e-5) for w <= MaxVelocity, 1e-5 above
+  (FUN_00888020). IdlePosition = Tno(idle) / (Tno(idle) - Tmax(idle)) (FUN_00888200).
+- **Engine impulse FUN_00888550**: downstream impulses first; if T > 0 the damping impulse is added; then
+  T x dt_stage; PreviousCurveAction = T; stall detection (flag 4) when T < 0 after T > 0 and FUN_00476920 [ENC]
+  > 300.
+- **Engine speed clamp** (vfunc 0x58 FUN_008884c0 -> FUN_00887f10): EngineState 1 and controller flag bit1 clear
+  -> v = clamp(v, IdleVelocity, MaxVelocity).
+- **Clutch** (FUN_00877e50): maxImp = clamp((1 - Position) x MaxAction x dt, 0, 100); need = |(v_in - v_out)
+  I_in I_out / (I_in + I_out)| (I_in = engine side + PartInertia[0], I_out = gearbox side + PartInertia[1]);
+  DegreeOfFreedom c = 1 if maxImp = 0, clamp(1 - maxImp / need, 0, 1) if maxImp < need - 1e-5 and c != 0, else 0:
+  **a locked clutch stays locked** until it is opened. Combined inertias FUN_008785e0: ((1 - c) I1 I2) / (c I2 + I1)
+  + PartInertia; velocities (vfuncs 0x54 / 0x58 FUN_00877720 / FUN_00877dc0): momentum weighted x (1 - c) + own x c.
+- **Gearbox** (FUN_008852d0 / FUN_00885230 / FUN_00884310): input inertia = GI0 + (I_down + GI2) InvSqr[g] InvSqr[9]
+  + GI1 InvSqr[g]; output inertia = GI2 + GI1 Sqr[9] + (I_up + GI0) Sqr[g] Sqr[9]; RatioArray = (R[g] R[9],
+  1 / (R[g] R[9])); output impulses go up divided by the ratio (FUN_00884480), input impulses down multiplied
+  (FUN_00884c30). GearRatioArray index 0 = reverse (-1st), 1 = neutral, 2.. = 1st.., 9 = 1.0.
+- **Differential** (FUN_00882920 / FUN_00881540 / FUN_00881680 / FUN_00881ab0 / FUN_00882a70): two degrees of
+  freedom with an inertia matrix (part inertias 0.001 x 5, GearRatioArray (3 / 9 / 1 at ctor, final drive)); the
+  velocity propagation FUN_00882420: **MaxTorqueBias = 0: both outputs at the carrier speed (spool); 0 < bias < 1:
+  the half difference of the outputs is limited to |bias m / (2 - bias)|** (m = carrier speed in output units),
+  i.e. the speed ratio of the two wheels stays under 1 / (1 - bias) (California 0.70: 3.3).
+- **Wheel axle** (vfunc 0x48 FUN_00870630): inertia update, then the **tyre update FUN_00869c30 at every stage**
+  and impulse += Torque x dt_stage x Direction. Slip coefficient FUN_0086fea0: Imax = MaxLongitudinalForce x R x
+  dt_stage, Icar = mass x LoadDistributionAtRest x R^2, Itot = PartInertia + connected shaft inertia, need = |(w -
+  LongVel / R) Icar Itot / (Icar + Itot)|; c = 1 if Imax = 0, else clamp(1 - Imax / need, 0, 1) when Imax < need -
+  1e-5, else 0. **Axle inertia FUN_008701f0 = ((1 - c) Itot Icar) / (c Icar + Itot) + PartInertia**: a gripping
+  wheel carries its share of the car inertia, a sliding one only its own.
+  FUN_0086fd50: setting the spin updates ContactLongitudinalVelocity = LongVel - R w and the slip ratio
+  (FUN_0046e760 [ENC]).
+- **Brake impulse** (FUN_00870300): J = -sign(v) x dt x MaxBrakingAction(wheel) x position, stop clamped.
+
+### 6.3 Engine controller (FUN_0088a410, first the gearbox controller update)
+State 0 starting: t += dt, t > StartingTime -> 1. State 1 running: Position = min(Position, MaxPosition); if
+FUN_00546910(engine) [ENC]: Position clamped to [IdlePosition, MaxPosition], and with flag bit1 (stall allowed)
+and the clutch not open and not in neutral -> state 3; else if FUN_00546810(engine) [ENC] and LimiterTime > 0 ->
+**state 2 (limiter: no-throttle torque) for LimiterTime** (`_rupteur_time`). State 3 stalling -> 4 after
+StallingTime. Phase E+0x100 += dt (mod 2 pi, rumble). The engine Position used by the torque is restored from the
+controller Position (vfunc 0x2c).
+
+### 6.4 Clutch controller (FUN_008810c0, FUN_00880fe0)
+States 0 engaging, 1 engaged, 2 disengaging, 3 disengaged. Engaging: Position = max(1 - t / EngagingTime, 0) (0 time
+-> 0); disengaging: min(t / DisengagingTime, 1) (0 time -> 1). setPosition(p): p = 0 -> 1, p = 1 -> 3, p > Position
+-> 2, else 0.
+
+### 6.5 Gearbox controller (FUN_008866a0 and state handlers)
+- Each update: aids Position = brake pedal, engine controller Position = throttle pedal; flag 8 ("both pedals") =
+  automatic box and low speed (|v|^2 <= 100, vehicle flag 0x8000 from FUN_0087ebf0) and brake != 0 and throttle >
+  IdlePosition.
+- States: 0 shifting down / 1 up (FUN_00885ae0 / FUN_00885a50 -> FUN_008858e0 with ShiftTimeDown / Up; engine
+  Position = 0 while shifting), 2 reverse (FUN_00885e20: **pedals swapped**), 3 neutral (FUN_00886440), 4 drive
+  (FUN_00886230).
+- Shift FUN_008858e0: neutral target -> immediate; else the clutch is opened (state 2 -> 3 with DisengagingTime 0),
+  the shift time runs while it is open, then FUN_00546f00 [ENC] completes the shift; the drive state re-engages the
+  clutch (EngagingTime) and **cuts the throttle pedal during the engagement except in 1st or under 10 m/s**.
+- Neutral: clutch opened; automatic box with the engine running: both pedals -> aids Position = max(brake,
+  throttle); at low speed: rolling back (FUN_0053fbd0 [ENC] < -0.1): full brake -> reverse, throttle -> 1st; standing
+  and FUN_00546ec0 [ENC] with full brake for **ReverseTime -> reverse**; throttle > IdlePosition -> 1st.
+- **Automatic shift** (drive state, flags of FUN_00884d80 computed after each velocity propagation): **up when the
+  engine is above the red line and the car speed (vfunc 0xcc [ENC]) is above 0.8 x vfunc 0x120(red line) [ENC]**;
+  **down when gear > 1st and R[9] R[g-1] x gearbox output speed < blue line**; neutral when both pedals or when
+  the engine idles (Position <= IdlePosition and v <= Idle + 1) with the throttle under IdlePosition.
+- End of the update: clutch open request (flag 0x10) = handler request | both pedals (Mode 0) | hand brake; aids
+  bit0 (wheels held) = both pedals.
+- The game (FUN_00bacd50) switches BlueLine / RedLine between `_blue_line` / `_red_line` and `_blue_line_sport`
+  / `_red_line_sport` with a throttle hysteresis (sport when throttle >= `_throttle_ratio_sport` x 0.01, back to
+  normal when throttle <= `_throttle_ratio_normal` x 0.01, tested when the throttle rises).
+
+### 6.6 Brake controller, ABS, traction control, hand brake (FUN_00865750, per wheel, per stage)
+- Hand brake (controller flag bit2 and aids bit3): target velocity (1 + SlipRatios[1]) LongVel / R, BrakingPosition 1
+  (under 1 m/s: target 0); held wheels (aids bit0 or controls state 3): target 0, position 1.
+- Pedal: BrakingPosition = aids Position; **ABS FUN_00865460** (when FUN_0054eae0 [ENC]): target = (1 +
+  SlipRatios[0]) LongVel / R (0 under 1 m/s); fraction = |(target x Direction - v) I| / (dt MaxBrakingAction)
+  (FUN_0086f950: 0 if the impulse would not oppose the spin, at most 1); if fraction < BrakingPosition:
+  BrakingPosition = fraction, aids bit2.
+- **Traction control FUN_008652b0** (when FUN_0054eaa0 [ENC]): same with SlipRatios[2]; if BrakingPosition <
+  fraction: BrakingPosition = fraction, aids 0x20 — **the traction control brakes the spinning wheel**, it does not
+  cut the engine.
+- SlipRatios[i] = the three aid curves at |speed| (FUN_0087ebf0). The game replaces the high speed point of the ABS
+  curve with `_abs_slip_ratio_secure / sport / hypersport` (or `_off`) by the aid level (game car +0x40, FUN_00bacd50
+  tail); the level itself is a player option (not read).
+- Dynamic FrictionScale (FUN_0086a990): grass and contact normal y <= 0.8 (manager +0x2c4) -> 0.2; braking
+  (BrakingPosition != 0) and slip ratio < 0 -> BrakingFrictionScale; wet (tyre flag bit3, set by FUN_00bacd50 when the
+  weather wetness > 0.33) -> WetFrictionScale (x BrakingFrictionScale when braking); else 1.
+
+### 6.7 Chassis-level laws
+- Tyre NormalForce clamped to 1e5 N (FUN_008739c0 / FUN_008720e0).
+- Spoiler anchors (FUN_0086c2c0): front (0, 0, FrontAxleLocalPos - COM z), rear (0, 0, FrontAxleLocalPos -
+  WheelBase - COM z) in the centre of mass frame (at the centre of mass height), ground effect at the centre of
+  mass.
+- Angular damping FUN_0087af20: CurveOffRoadAngularDamping when every grounded wheel is on dirt / grass, else
+  CurveAngularDamping. Linear damping FUN_0087af70: LinearDampingOffset + CurveOffRoadDirt / Grass by
+  CurrentContext (FUN_0087ab80: 1 when all wheels are on dirt, 2 all on grass, 0 when no wheel is off road).
+- Extra gravity (FUN_0087ebf0): NoWheelOnGroundElapsedTime t; factor = Min (t < AccelDelay), linear to Max over
+  AccelDuration, Max after; passed to FUN_00548370 [ENC].
+- Ground material -> tyre surface (game FUN_00ba81a0): 1 dirt for ids {1, 0x3d, 0x3e}, 2 grass for {2, 4, 5, 0xb..0xd,
+  0x2b..0x2e, 0x42}, 0 tarmac otherwise.
+- World gravity -9.81 (DAT_00f4b4d0).
+
+### 6.8 Not found / encrypted [ENC]
+Motion integration and the constraint solver (car vfuncs 0x28 / 0x2c / 0x30 / 0x134 / 0x138 / 0x194 / 0x198 at
+0x544xxx-0x545xxx, wheel vfuncs 0x54cxxx), the suspension force law (suspension vfunc 0x24 = 0x54bc70 / 0x54bac0),
+the wheel contact (FUN_008720e0 calls ENC vector helpers 0x42xxxx-0x47xxxx), the axle brake application (axle vfuncs
+0x54 / 0x58), the RK4 combination, the ABS / TC activation tests (FUN_0054eae0 / FUN_0054eaa0), the slip ratio from
+the spin (FUN_0046e760), the wheel inertia from its mass (vfunc 0x9c), the chassis inertia (0x544400), the predicates
+FUN_00546910 / FUN_00546810 / FUN_00546ec0 / FUN_0053fbd0 / FUN_00546f00 and the speed getters vfunc 0xcc / 0x120 /
+0x124.
+
+---------------------------------------------------------------------------------------------------
+## 7. OpenTDU2 implementation (`source/physics/vehicle_data.*`, `vehicle_dynamics.*`)
+- [CODE] 90 Hz ticks (1/90 s, frame time consumed in ticks), one chassis sub step, NbLoopForMiddlePrecision drive
+  train sub steps of 4 stages [h, h/2, h/2, h]; engine torque / damping / speed clamp, engine / clutch / gearbox
+  controllers and the automatic shift flags, sport / normal lines, clutch slip law, gear ratios, open differential
+  with the MaxTorqueBias speed limit, axle slip coefficient and effective inertia, tyre torque at every stage, brake
+  impulse, ABS / TC / hand brake regulation, FrictionScale, NormalForce clamp, aero anchors, extra gravity ramp,
+  damping curves and context, Pacejka / combination (§4).
+- [INF] (ENC or not read): the RK4 combination (classic weights 1/6, 2/3, 2/3, 1/6 over the stage increments);
+  the controllers run once per drive train sub step with the sub step time; the shaft network reduced to the
+  engine shaft, the open differential carrier (equal torque split) and the axles, the locked chain solved as one
+  impulse; ENC predicates: idle governor when v <= idle, limiter when v >= MaxVelocity, vfunc 0xcc = forward speed,
+  vfunc 0x120(w) = w / (ratio x final) x R, FUN_00546ec0 = throttle under IdlePosition, FUN_00546f00 = gear engaged,
+  ABS active above AbsControlActivation, TC on driven wheels above TractionControlActivation; brakes with a target
+  drive the wheel towards it within BrakingPosition x MaxBrakingAction x dt; brake controller flags (brakes on all
+  wheels, hand brake on the rear); reverse exit at low speed when the reverse pedal (brake) is released.
+- [INF] chassis (§6.8): raycast wheels on one rigid body (semi-implicit Euler), spring k (x - LowerStop), dampers,
+  bump stop, anti-roll; contact coupling: longitudinal chassis impulse = (drive + brake impulse - own axle inertia x
+  spin change) / R, limited by MaxLongitudinalForce x dt within the friction ellipse (the rest stays in the spin),
+  gripping axles then follow the contact speed (momentum weighted with their car share) and the engine follows the
+  carrier when the clutch is locked; lateral = Pacejka force limited at low speed; rolling resistance 0.015;
+  wheel inertia 1/2 m r^2; box chassis inertia; centre of mass height = hub line + `_gravity_center_height`;
+  grass = heightfield (no material ids in the OpenTDU2 collision); no weather (dry); steering angle rate-limited by
+  the SteeringVelocity curve (the steering column / feedback of FUN_0087b590 not decoded).
+- Debug: `-vehtest` (flat plane, friction 0.7): 0-100 / 0-200 / 402 m / top speed, 100-0, steady-state cornering
+  (steering 0.25 / 0.5 / 1, 60 / 100 km/h, speed loop) logged as `VEHTEST`; drive train trace `VEHTEST dt`
+  (`getDebugState`); `-aids sport|hypersport` selects the aid columns.
+
+### 7.1 Measurements (California, `-vehtest`)
+| | before (raycast model, decoded set-up) | after (edVehicle drive train) | DB |
+|---|---|---|---|
+| 0-100 km/h | 4.08 s | **4.65 s** (launch from neutral: shift 0.1 s + clutch 0.2 s, wheel spin until the TC activation at 10 km/h, TC target slip 0.5 -> 0.1 between 10 and 70 km/h) | _acceleration_0_100_kmh 4.1 |
+| 0-200 km/h | 13.10 s | 14.02 s | - |
+| 402 m | 12.12 s | 12.78 s | - |
+| top speed | 312.4 km/h | **309.7 km/h** (7th gear) | _max_theorical_speed 310 |
+| 100-0 km/h | 28.8 m (2.08 s) | 34.5 m (3.33 s, ABS target -0.08) | _braking_100_0 100, _brakingdist 60 (units not known) |
+| corner steer 0.25, 60 km/h | 0.90 g, R 32.0 m | 0.88 g, R 31.8 m | - |
+| corner steer 0.25, 100 km/h | 1.44 g, R 54.4 m | 1.44 g, R 53.8 m | - |
+| corner steer 0.5, 100 km/h | slows to 32 km/h, 0.86 g | spins (speed loop throttle) | - |
+
+Shift points measured: up-shifts at 7900-8000 rpm (red line 8000, normal = sport for the California), 1st -> 2nd at
+64 km/h. FREERIDE (`-logdrive`): full throttle down the village street: 1st -> 2nd at 64 km/h,
+2nd -> 3rd at 101 km/h, the car leaves the road where the street bends (no steering) and stops upright against a
+tree; throttle to 80 km/h, brake, then steering left: down-shifts 2 -> 1 at 51 km/h (blue line rule), the car turns
+into the fence on the left side and stays on its wheels (screenshots `fr_accel.png`, `fr_turn.png`, `fr_steer*.png`,
+plot `accel_before_after.png` in the session scratchpad `vehsolver/`).
+
+---------------------------------------------------------------------------------------------------
+## 8. Open points
+- The chassis / contact constraint solver, suspension law, RK4 combination and the ENC predicates listed in §6.8.
+- Steering column dynamics (FUN_0087b590 tail, FeedbackImpulse) and the steering control object.
+- The game's gear request object (game car +0x24: manual / sequential requests) and its ReverseTime use.
+- Aid level of the player (game option, game car +0x40) and the TC curve replacement per level.
+- Ground material ids of the road / terrain collision (needed by FUN_00ba81a0); weather wetness.
 - `physics/tires.bnk` `.bpjka`: unreferenced by readable code.

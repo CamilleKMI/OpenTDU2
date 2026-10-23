@@ -29,6 +29,7 @@ public:
     static constexpr uint32_t kTrackFx = 0x00007846;       // "Fx"
     static constexpr uint32_t kClassCamera = 0x2a043536;
     static constexpr uint32_t kClassActor = 0xd039fa46;
+    static constexpr uint16_t kRefMessage = 0x020b; // REFS: actor message string (no hashcode)
 
     struct Track {
         uint32_t Id = 0;
@@ -37,8 +38,25 @@ public:
         std::vector<float> Values; // NumComponents per key (raw dwords)
     };
 
+    // Actor property track (id 0xd3593709): { u16 0; u16 1; u32 Size; u32 Id;
+    // u32 NumSubTracks; char Name[128] (e.g. "LookAtTargetFaceFx"); sub
+    // tracks { u16 3; u16 1; u32 Size; u32 0xa58b238b; u32 NumKeys; f32
+    // Duration; f32 Times[NumKeys]; keys { u32 0; f32 length; char value[] }
+    // } } [DATA M_TESS_Tess.sce, garage M_INTRO_intro.sce: one key each].
+    // The value is read by the avatar property setter FUN_00b854d0
+    // (strcmp "LookAtTargetFaceFx" -> avatar +0x1c58).
+    static constexpr uint32_t kTrackProperty = 0xd3593709;
+    struct Property {
+        std::string Name;
+        std::vector<float> Times;
+        std::vector<std::string> Values;
+        // Value of the last key <= time ("" before the first key).
+        const std::string &valueAt( float time ) const;
+    };
+
     struct Object {
         std::string Name;
+        std::vector<Property> Properties;
         uint32_t ClassHash = 0;
         uint32_t NameHash = 0;
         uint64_t EntityHashcode = 0;
@@ -46,6 +64,7 @@ public:
 
         inline bool isCamera() const { return ClassHash == kClassCamera; }
         const Track *findTrack( uint32_t id ) const;
+        const Property *findProperty( const char *pName ) const;
         Vector3f samplePosition( float time ) const;
         Quaternionf sampleRotation( float time ) const;
         float sampleFloat( uint32_t trackId, float time, float defaultValue ) const;

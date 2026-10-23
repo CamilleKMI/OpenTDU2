@@ -39,7 +39,10 @@ public:
     // surface (plane through the hub targets).
     Matrix4x4f fitOnGround( Vector3f position, const Quaternionf &rotation,
                             const SurfaceFunction &surfaceHeight ) const;
-    void assignEnvironment( EdenRenderer &renderer, GPUTexture *pCube );
+    // Environment cube of the car reflections: the dynamic cube rendered
+    // around the car, or a static cube (bDynamic false: the CUBECAR texture
+    // of the garage bank).
+    void assignEnvironment( EdenRenderer &renderer, GPUTexture *pCube, bool bDynamic = true );
     // Door opening (docs: /tmp/claude-0/spec_garage_car.md 3): side 0 left
     // (DOOR_L, car slot 29), 1 right (DOOR_R, 30). FUN_00c67230 /
     // FUN_00c67200 store the angle at car +0xa794 / +0xa790; without the

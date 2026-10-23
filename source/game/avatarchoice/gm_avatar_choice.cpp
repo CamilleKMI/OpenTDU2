@@ -209,7 +209,8 @@ void GMAvatarChoice::updateWalkMode( float deltaTime ) {
     // FUN_00da87f0: C_TESS when the camera enters the Tess volume.
     if ( !bTessStarted ) {
         const IntroCinematic::Volume *pTess = intro.findVolume( "Tess" );
-        if ( pTess != nullptr && pTess->contains( walk.getPosition() ) ) {
+        // Test shortcut -tess: C_TESS at once (facial animation tests).
+        if ( pTess != nullptr && ( pTess->contains( walk.getPosition() ) || CmdLine::HasArg( "-tess" ) ) ) {
             intro.closeGoal();
             walk.clearSelection( intro );
             intro.setCameraOverride( nullptr );

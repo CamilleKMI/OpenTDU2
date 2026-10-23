@@ -187,9 +187,8 @@ FUN_00d61790 only opens the box when `DAT_00f803ae == 0`, then sets `DAT_00f803a
    `Input=false`, FSCommands **`camn`, `wmof`, `gain`**. [DATA, intro.vmf root frame 0 action at 0x03e3]
 3. `gain` → step 1 (§1.2).
 
-Mapping FpSelectable Type 5 → string `garage`: [ENC]. The wrapper objects for OfType-2 selectables are built by
-constructors at 0x4f4040/0x4f4050/0x4f4060 (encrypted). [INF] Type 5 → `garage` (only garage-capable string in the
-ActionScript; the entity is named `Garage` and its SelectableString is empty, whereas the car volume has "car").
+Mapping FpSelectable Type 5 → string `garage`: table 0x00edd580 read by the wrapper vf0c FUN_00953350 (§4.1)
+[CODE+DATA].
 
 ---------------------------------------------------------------------------------------------------
 ## 3. Step 1: the garage (FIRST_WM, garage.bnk)
@@ -338,19 +337,40 @@ Then C_OUT → C_OUTRO → step 2 (§3.4).
 
 ### 4.1 Walk-mode manager (global `DAT_00fd95e0`; the mode's instance at `mode+0x6b724*4`) [CODE]
 
-- Registration (FUN_0094f1c0): every `ZSPF` FpSelectable of the scene; OfType 1 → table +0x970, OfType 2 → table
-  +0x7e0 (8-byte {vtable, entity} wrappers), other → 0x40-byte records +0x980; list of pointers at +0xb80, count +0xcc.
-  For OfType 2 the wrapper's vfunc+0x38 returns Type; vfunc+0x34 is compared with the previous game mode to pick the
-  spawn entry (INF).
-- Per frame (FUN_00952410), active if +0xd1c, frozen if +0xd1d:
+- Registration (FUN_0094f1c0): every `ZSPF` FpSelectable of the scene, by its **Type (entity +0x170)**: Type 1 →
+  table +0x970, Type 2 → 0x40-byte records +0x980 (FUN_009532c0, vtable 0x00f2db78), other → table +0x7e0 (8-byte
+  {vtable, entity} wrappers, array constructor 0x4f4040 [ENC]); list of pointers at +0xb80, count +0xcc. In game
+  mode 0x1d only the entities with +0x9c bits 0 and 1 set are registered. (+0x160 is OfType.) [CODE]
+- Wrapper vtables (readable, .rdata): 0x00f2db30 / 0x00f2db78 (FpSelectable: vf04 FUN_009533b0, vf08 FUN_009533a0 =
+  entity +0x40 = the placement position / FUN_00953230, vf0c FUN_00953350, vf14 FUN_009534c0, vf2c FUN_00953d50),
+  0x00f2da10 and 0x00f2d9b4 (other selectable kinds). **vf2c = FUN_00953d50 in every vtable: returns DAT_00edd270 =
+  10.0** [CODE+DATA].
+- **Type → `/:SelItemType`** (vf0c FUN_00953350): Type 57 (0x39) → vf3c (0x4f3ec0 [ENC]; [INF] the SelectableString,
+  "car"); otherwise the table at **0x00edd580** (16-byte rows {Type, name, icon id, …}, ends at Type −1):
+  0 exit, 1 carseller, 4 stolencar, 2 player, 3 carrenter, **5 garage**, 6 living, 54 club, 7 realtor,
+  8 photographer, 9 diary, 10 dressing, 49 game_progress, 50 bar, 51 office, 52 photos, 53 photo_expo, 12–16 / 33–48 /
+  55 billboard, 17–19 / 26 / 30 / 31 npc, 20 tutor, 21 npc_receiver, 22 goodies, 23 npc_tuner, 24 / 25 / 28
+  npc_stickers, 27 surgeon, 29 hairdresser, 32 npc_airport_hostess, 56 jacuzzi, 57 "" [DATA].
+- Per frame (FUN_00952410, asm 0x9524a2–0x9526c0), active if +0xd1c, frozen if +0xd1d:
   - cooldown +0xd18 -= dt;
-  - for each item: `pos = item->vf08()`, `d = pos − cam(+0xd50)->pos(+0x310)`; keep if `dot(camForward, d) > 0`,
-    `|d|² < item->vf2c()²` (radius) and nearer than the best, and `item->vf04(camPos, camDir)` (ray/volume hit);
+  - for each item: `pos = item->vf08()` (the volume's placement position, e.g. Garage (20.239, 33.110, 3.206)),
+    `d = pos − cam(+0xd50)->pos(+0x310)`; keep if `dot(camForward, d/|d|) > 0`, **`|d|² < item->vf2c()² = 100`
+    (10 m from the eye to the volume position)** and `|d|²` below the best so far (start FLT_MAX), and
+    `item->vf04(camPos, camDir)`; **the nearest position wins** (not the nearest ray hit);
+  - vf04 for a box (FUN_009533b0 → FUN_00953d80): FUN_00cca610 intersects the ray with the volume (0, 1 or 2 points);
+    the segment eye → farthest point (or eye + vf2c() × dir when there is no point) is cast against the scene
+    collision (FUN_00bd2f80); no hit → FUN_00cca690, hit → FUN_00ccb960(hit point) (point in the volume) [CODE];
+    the exact return values of FUN_00cca690 / FUN_00ccb960 are not traced [INF: "visible": no obstacle before the
+    volume, or the obstacle hit lies inside the volume];
   - `SetSelected(best)` (FUN_0094f440): ignores changes while cooldown > 0 (except to −1); calls old->vf18 (leave),
     new->vf14 (enter), **flash `/:SelItemType` = new->vf0c()** (string), sets the item icon/text vars, cooldown = 0.2 s,
     then calls the movie's item function (vfunc +0xd4 of the walk movie at +0xd10) (INF: ActionScript `ItemType('over'/'out')`).
-  - Reticle depth: ray from DAT_01195b80 along the camera forward × 50.0 (FUN_00bd2f80); `/cursor` clip gets
-    `hitFraction × 50` or 50.0 when nothing is hit (vfunc +0x100) [CODE].
+  - Reticle depth: ray from DAT_01195b80 along the camera forward × 50.0 (DAT_00f4a040, FUN_00bd2f80); `/cursor` clip
+    gets `hitFraction × 50` or 50.0 when nothing is hit (vfunc +0x100) [CODE]. **The 50 m is only this cursor depth,
+    not a selection distance.**
+- OpenTDU2 (`source/game/walkmode/walk_mode.cpp`): the rule above with the volume slab test and
+  `RaycastHavokCollision` for vf04. The "Garage" prompt appears when the eye is within 10 m of (20.239, 33.110,
+  3.206) and the reticle is on the door box.
 - FSCommands handled by the manager (FUN_00952fa0): `camn`, `camf`, `cain`, `caou`, `emop`, `emcl`, `wmof`
   (walk mode off: FUN_0094ed80 + FUN_0094fb30), `wmon` (walk mode on: FUN_0094fb90), `rqca`, `shou` [CODE].
   FIRST_WM: `opdo` (open door: FUN_00a48770(2.0,1,1,1) when not seated), `wmof` ignored while in "INTRO" [CODE,
@@ -387,6 +407,31 @@ angry, sad(_02), strong, laugh, followme). No separate run clip [DATA]. Speed/bl
   0x85b57a55_0f8c576d) [CODE]; C_TESS requires the camera type 9 (§2.5) [CODE] → [INF] type 9 = walk-mode camera.
 - Follow-camera math (orbit, collision, head look): [ENC].
 
+### 4.3b Walk camera eye height (camera type 9) [CODE]
+
+The manager's camera `+0xd50` = `FUN_00ca0840(9)` (FUN_009511d0). Camera factory FUN_00ca3f70: type 9 →
+FUN_00c823e0 (0x480 bytes, vtable 0x00ef4cb4; per-frame update vf02 = FUN_00c82840).
+
+- **Character proxy** (FUN_00c825a0, created when +0x448 is set and +0x380 is null): ray from the camera
+  position (+0x310) straight down (0, −1, 0), length 10.0 (DAT_00edd270) (FUN_00bd51a0 / FUN_00bd4230). Hit →
+  proxy start = hit point + (0, **0.3** (double 0x00f4a178) + **0.6** (double 0x00f49ea0), 0). No hit → camera
+  `+0x330` + (0, 2.0, 0) (the `+0x330` field is not traced). `FUN_00bcea00(pos, 0.3 (DAT_00ede42c), 1.2
+  (DAT_00edf24c), 80.0 (DAT_00edf1dc), 0, 0, 1.0)`: capsule radius 0.3, segment 1.2 (vertices at ±1.2 × 0.5
+  (0x00f49748)); total height 1.8, centre at floor + 0.9. The `80` goes to FUN_006929b0 [ENC] (max slope [INF]).
+- **Eye offset** (FUN_00c82840 at 0xc8358b, when +0x44b is clear): `+0x3c0 = (0, 0.7 (DAT_00eddb08), 0, 0)`
+  (rotated by FUN_0045b810 [ENC] when the lean value +0x444 ≠ 0); `+0x390` (camera position) = proxy position
+  (proxy +0x110) combined with `+0x3c0` and the world origin (FUN_004298d0 [ENC]; [INF] vector add/sub).
+- **Avatar under the camera** (FUN_00950470): avatar position = camera position − `+0x3c0` − (0, 0.6 + 0.3, 0)
+  (the same two doubles), facing the camera target (+0x320) with y = 0 → the avatar's feet are on the floor,
+  confirming `eye = proxy centre + 0.7`.
+- **Eye height = floor + 0.3 + 0.6 + 0.7 = 1.6 m**, for WalkModeMan and WalkModeWoman alike: none of these
+  functions reads the avatar sex, height or scale (the AvatarOnline entity only gives +0x284/+0x288/+0x2a4 →
+  camera +0x460/+0x468/+0x46c, walk speeds [INF]). The start camera (`cam_entree_xx`, `cam_entree` y 1.211 above
+  the garage floor) only gives x/z and the floor below it.
+- OpenTDU2 (`walk_mode.cpp`): before, eye height = start camera − floor (1.21 m in the garage); now the eye is
+  put at floor + 1.6 m under the start camera (ray 10 m) and kept at 1.6 m above the floor while walking; body
+  sphere radius 0.3 (the proxy radius). Step height / slope of the proxy: [ENC] (OpenTDU2 keeps 0.4 m).
+
 ### 4.4 Collisions
 
 House: `new_intro.bnk` → `intro_lph_l3di_57E5C829CCD9F2C6.shk`; garage: `garage.bnk` → `garage_int_…shk` (static)
@@ -415,8 +460,39 @@ and `.dhk` (dynamic, hinges). Both are Havok 5.5 packfiles wrapped in an Eden he
     dressing 19, billboard 27, **garage 35**, diary 42, game_progress 48, game_plug 60, exit 70, gme 83, club 90;
     contains `ic_container`), `top_bar` (2350).
   - `mini_menu` (2384), `maskMiniMenu` (2357).
-- [INF] The "A" glyph is the help/mini-menu button text (SetHelp `m_menu`/`m_menu_pc` by `_root.WhatPlatform`); its
-  exact clip was not followed.
+- **`low_bar.ic.icLoaded`** [DATA, `vmf2.py intro.vmf --sprite 2354/2345/3`]: low_bar frame 0 action
+  `Stop(); ic.attachMovie('specificIcons', 'icLoaded', 0); opened = 0`. `specificIcons` is the ExportAssets name of
+  **character 3** (tag at file offset 0x192: count 1, id 3). Sprite 3 (18 frames): label `garage` at f0 (`stop()`),
+  shape ch2 = bitmap 1 (75×75, the garage-door icon) at (11.2, 11.2) scale 0.7. `disp_low_bar` does
+  `low_bar.ic.icLoaded.gotoAndStop(_root.SelItemType)` → for `garage` the icon stays on frame 0. `ic` (sprite 2345:
+  only `ic_container`, an invisible 75×75 rectangle; its labels living/home/…/club just stop) is placed at
+  (500.5, −530.6) × 0.402 in low_bar with alpha 0 and is faded/scaled in by the `open` animation (f12 alpha 0.25 …),
+  i.e. **the garage icon is drawn well above the "Garage" bar**, near the top of the screen. The Eden player
+  implements `attachMovie` (method name string at 0x00e4b37c, list "attachMovie, removeMovieClip, gotoAndStop, …")
+  [CODE string]; OpenTDU2's FlashPlayer did not → icLoaded was missing. Now `FlashPlayer::attachMovie` (exports of the
+  movie, scripted depth above the timeline depths, kept across timeline seeks).
+- In the original screenshot (walk mode, reticle on the garage door) the two garage icons are: the **upper,
+  screen-centred one with the flat elliptic ring = this flash `icLoaded` + `top_bar` (sprite 2350)**, and the lower
+  one in a dark disc = the 3D `HOLOGRAMS` marker (§5.1b). OpenTDU2 renders both now
+  (scratchpad garage/after_near.png) [DATA + render check].
+- The round glyph just above the "Garage" label is the low_bar child d9 (sprite 2334, placed at f11 at
+  (492.2, 37.5)): the pad shows `A`, OpenTDU2 shows the movie's own glyph (green tick) for keyboard play — unchanged
+  [INF: which variant the PC keyboard build shows was not traced].
+
+### 5.1b HOLOGRAMS (3D garage marker above the door) [DATA + CODE]
+
+- new_intro.bnk `Entity__Actor` **`HOLOGRAMS`** (`__Hc` 0x2df8c23b60396fe4, identity placement, Flags[0] = 2): mesh
+  `intro_lph_l3di_71E55BD0121EDBE1.3DD` (one INS `HOLOGRAM` at **(20.38, 33.76, 3.19)**, 90° yaw: on the garage door,
+  0.65 m above the selectable centre) / `.3DG` / `.2DM` (materials `T_Sprite_Garage` (texture `ico_garage.2db`,
+  FADEALFA) and two `Pulse_DarkBlue_` (`pulse_darkblue_.2db`, `pulse_blue_02_.2db`) animated by
+  `Pulse_DarkBlue_A_1.UVA` / `Pulse_DarkBlue_Al_0.UVA` (the pulsing rings)).
+- Visibility: entity +0x9c bit 0 = active (base ctor sets +0x9c = 7 at 0xb94ef0; FUN_00dc7290 updates only when set;
+  FUN_00b45960(show) sets / clears it). `FUN_009b42d0` sets it on the entity named "HOLOGRAMS" (show),
+  `FUN_009b4360` clears it (hide). Callers: photo mode enter/leave (FUN_009412f0 hide / FUN_00941860 show, house modes
+  8, 9, 0x16), the money/shop UI (FUN_0090ba70 hide / FUN_0090bf10 show), FUN_009a3ae0 (cam_WalkMode sub-mode),
+  LIVING loaders FUN_009b5210 / FUN_009f4ab0 (hide), FUN_009bd8d0 (hides 8 sub-objects when not the owner). **None in
+  AVATAR_CHOICE**, and no .cin/.sce of new_intro.bnk references the entity hash → shown all along [CODE + DATA].
+- No distance or selection dependency in readable code: the pulse is the UV animation of the ring materials.
 
 ### 5.2 Objective box: GENERAL.vmf `pop_goal` [DATA, `gen_628.txt`]
 
@@ -478,9 +554,12 @@ No subtitle strings were found for the Tess voice lines (voices only) [DATA: no 
 
 - Who shows "Talk to Tess" (5033) and sets TUTO_TALK_TO_TESS: [ENC] (no readable xref; the string and the id are not
   in readable code or data). Implement: show it when walk mode starts (end of C_FIESTA_INTRO_xx) [INF].
-- FpSelectable Type → SelItemType string, selectable radius (vf2c) and hit test (vf04): wrappers built in encrypted
-  constructors [ENC]. [INF] Type 5 → "garage", Type 57 → "car".
-- Walk controller physics (step-up, capsule, slopes), follow-camera algorithm, turn/walk blending: [ENC].
+- FpSelectable wrappers: the array constructors 0x4f4040/0x4f4050/0x4f4060 are [ENC], but the vtables are readable
+  (§4.1): radius vf2c = 10 m [CODE], Type → string table 0x00edd580 [DATA] (Type 5 → "garage"). Still [ENC]: vf3c
+  (Type 57 string: [INF] SelectableString "car") and which of the two FpSelectable vtables the 0x4f4040 wrappers get
+  ([INF] 0x00f2db30; both have the same vf04/vf0c/vf2c).
+- Walk controller physics (step-up, slopes), follow-camera algorithm, turn/walk blending: [ENC]. The capsule
+  (radius 0.3, height 1.8) and the 1.6 m eye height are readable (§4.3b) [CODE].
 - `zcde/zcvn/zcne`, `wmod`, `weat`, `shad` message handlers: [ENC] (intro_spec).
 - What `mode[0x6e0a1]` holds (cam_entree index), meaning of vehicle field +0xa794, input codes 0x38 / 3.
 - Havok packfile field layout (not decoded here).

@@ -1573,8 +1573,9 @@ TransientAllocation RenderDevice::allocateTransient( VkDeviceSize size,
     return allocation;
 }
 
-VkSampler RenderDevice::getSampler( eSamplerFilter filter, eSamplerAddress address ) {
-    const uint32_t key = ( static_cast<uint32_t>( filter ) << 8 ) | static_cast<uint32_t>( address );
+VkSampler RenderDevice::getSampler( eSamplerFilter filter, eSamplerAddress addressU, eSamplerAddress addressV ) {
+    const uint32_t key = ( static_cast<uint32_t>( filter ) << 16 ) | ( static_cast<uint32_t>( addressV ) << 8 ) |
+                         static_cast<uint32_t>( addressU );
     auto it = samplers.find( key );
     if ( it != samplers.end() ) {
         return it->second;
@@ -1586,15 +1587,18 @@ VkSampler RenderDevice::getSampler( eSamplerFilter filter, eSamplerAddress addre
     samplerInfo.magFilter = bLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     samplerInfo.minFilter = bLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     samplerInfo.mipmapMode = bLinear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    VkSamplerAddressMode mode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    if ( address == eSamplerAddress::SA_Wrap ) {
-        mode = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    } else if ( address == eSamplerAddress::SA_Mirror ) {
-        mode = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-    }
-    samplerInfo.addressModeU = mode;
-    samplerInfo.addressModeV = mode;
-    samplerInfo.addressModeW = mode;
+    auto mode = []( eSamplerAddress address ) {
+        if ( address == eSamplerAddress::SA_Wrap ) {
+            return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        }
+        if ( address == eSamplerAddress::SA_Mirror ) {
+            return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        }
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    };
+    samplerInfo.addressModeU = mode( addressU );
+    samplerInfo.addressModeV = mode( addressV );
+    samplerInfo.addressModeW = mode( addressU );
     samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
     VkSampler sampler = VK_NULL_HANDLE;
     vkCreateSampler( device, &samplerInfo, nullptr, &sampler );

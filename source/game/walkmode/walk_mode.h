@@ -9,8 +9,16 @@ class IntroCinematic;
 
 // Walk mode manager (DAT_00fd95e0, docs/re/tess_garage_spec.md 4.1) on an
 // IntroCinematic scene: first person controller on the scene collision
-// (.shk), camera, FpSelectable selection with the reticle ray (50 m,
-// 0.2 s re-selection cooldown), INTRO movie ItemType('over'/'out').
+// (.shk), camera, FpSelectable selection (position within 10 m in front
+// of the eye, reticle ray on the volume, not occluded; 0.2 s re-selection
+// cooldown), INTRO movie ItemType('over'/'out').
+// Look-at (docs/re/facefx_spec.md 6.3.3): the selection never makes the
+// hovered character look at the player (no look-at call in FUN_00952410,
+// FUN_0094f440 or the FpSelectable enter/leave vf14/vf18) [CODE]. The only
+// walk-mode look-at, FUN_00b858f0 at 0x9520b9, is in the player-avatar state
+// machine FUN_009519a0 (states 6 and 8: the self-view camera type 10, avatar
+// faded in) and makes the PLAYER's avatar look at the camera; OpenTDU2 has no
+// self-view yet, so there is no caller (API: IntroCinematic::setLookAtTarget).
 class WalkMode {
 public:
     // Starts at an Entity__Camera (cam_entree_xx / cam_entree).
@@ -33,7 +41,7 @@ public:
 private:
     WalkController controller;
     float fov = 1.0472f;
-    float eyeHeight = 1.48f;
+    float eyeHeight = 1.6f; // floor + 0.9 (proxy centre) + 0.7 [CODE, walk_mode.cpp]
     int32_t selected = -1;
     float cooldown = 0.0f;
     SelectableFilter selectableFilter;

@@ -202,6 +202,9 @@ void RunVehicleTest( const VehicleDynamics &templateVehicle ) {
         if ( ( i % 30 ) == 29 && t <= 40.0f ) {
             logState( "accel", t, v );
         }
+        if ( t <= 6.0f && ( i % 3 ) == 2 ) {
+            OTDU_LOG_INFO( "VEHTEST dt t %5.2f v %6.1f %s\n", t, v.getSpeedKmh(), v.getDebugState().c_str() );
+        }
     }
     OTDU_LOG_INFO( "VEHTEST result '%s': 0-100 km/h %.2f s (DB %.2f), 0-200 %.2f s, 402 m %.2f s (DB %.2f), top %.1f km/h at %.1f s (DB %.0f)\n",
                    setup.Db.FileName.c_str(), t100, setup.Accel0To100, t200, d400, setup.QuarterMile, top, tTop,
@@ -226,6 +229,41 @@ void RunVehicleTest( const VehicleDynamics &templateVehicle ) {
     OTDU_LOG_INFO( "VEHTEST result '%s': 100-0 km/h %.1f m in %.2f s (DB _braking_100_0 %.0f, _brakingdist %.0f)\n",
                    setup.Db.FileName.c_str(), ( v.getPosition() - brakeStart ).length(), tStop, setup.Braking100To0,
                    setup.BrakingDistance );
+    // Steady-state cornering: fixed steering input, throttle held by a
+    // speed loop (debug driver), yaw rate / lateral acceleration after 8 s.
+    for ( const float steering : { 0.25f, 0.5f, 1.0f } ) {
+        for ( const float targetKmh : { 60.0f, 100.0f } ) {
+            v = templateVehicle;
+            v.reset( Vector3f( 0.0f, 0.12f, 0.0f ), Quaternionf(), Vector3f( 0.0f, 0.0f, targetKmh / 3.6f ) );
+            input = VehicleDynamics::Input();
+            float yawRate = 0.0f, lateral = 0.0f, speedSum = 0.0f;
+            int32_t samples = 0;
+            for ( int32_t i = 0; i < 12 * 60; i++ ) {
+                const float kmh = v.getSpeedKmh();
+                input.Steering = steering;
+                input.Throttle = Clamp( ( targetKmh - kmh ) * 0.2f + 0.3f, 0.0f, 1.0f );
+                input.Brake = kmh > targetKmh + 8.0f ? 0.3f : 0.0f;
+                const Quaternionf before = v.getOrientation();
+                v.step( dt, input, flat );
+                if ( i >= 8 * 60 ) {
+                    const Vector3f f0 = before.rotate( Vector3f( 0.0f, 0.0f, 1.0f ) );
+                    const Vector3f f1 = v.getOrientation().rotate( Vector3f( 0.0f, 0.0f, 1.0f ) );
+                    const float yaw = std::atan2( f0.x * f1.z - f0.z * f1.x, f0.x * f1.x + f0.z * f1.z ) / dt;
+                    yawRate += yaw;
+                    lateral += yaw * v.getVelocity().length();
+                    speedSum += kmh;
+                    samples++;
+                }
+            }
+            yawRate /= Max( samples, 1 );
+            lateral /= Max( samples, 1 );
+            OTDU_LOG_INFO( "VEHTEST corner '%s': steer %.2f target %.0f km/h -> %.1f km/h, yaw %.3f rad/s, lateral %.2f m/s2 "
+                           "(%.2f g), radius %.1f m, steer angle %.2f deg, gear %d\n",
+                           setup.Db.FileName.c_str(), steering, targetKmh, speedSum / Max( samples, 1 ), yawRate, lateral,
+                           lateral / 9.81f, std::abs( yawRate ) > 1e-3f ? v.getVelocity().length() / std::abs( yawRate ) : 0.0f,
+                           v.getSteerAngle() * 57.29578f, v.getGear() );
+        }
+    }
 }
 } // namespace
 

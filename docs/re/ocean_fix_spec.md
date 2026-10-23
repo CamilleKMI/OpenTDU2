@@ -73,3 +73,6 @@ Evidence: `…/scratchpad/oc/foam_before_after.png`.
   makes it effective.
 - 2DM per-slot address bytes are ignored renderer-wide (every material uses LinearWrap). Only TD_backwash is overridden
   here. A general mapping (D3DTADDRESS per axis) would need per-axis samplers in EdenRenderer.
+  **Update**: EdenRenderer now applies the per-axis slot addressing to every 2DM material (skin_zones_spec §1.7);
+  the TD_backwash override in eden_world.cpp (mirror on both axes) still runs after it and could now be dropped
+  (the slot's (1, 2) gives wrap U / mirror V exactly).

@@ -334,6 +334,25 @@ bool EdenAvatar::load( EdenAvatarLibrary &library, const char *pConfigId ) {
         headParts.push_back( parts.size() - 1 );
     }
     applySkin( library.getConfigBank().findEntry( avtName.c_str(), "avt" ) );
+    // FaceParamArray (FUN_00cbd030: memcpy of 0x31 bytes to +0xa2): a list
+    // of 49 child nodes {u16 3, u16 key, u8 value}, in order [INF: element
+    // order = file order].
+    memset( faceParams, 0, sizeof( faceParams ) );
+    if ( const BankEntry *pAvt = library.getConfigBank().findEntry( avtName.c_str(), "avt" ) ) {
+        const uint8_t *pValue = nullptr;
+        size_t valueSize = 0;
+        if ( pAvt->Size > 2 && FindAvtBytes( pAvt->pData, 2, pAvt->Size, 0x9d93, pValue, valueSize ) ) {
+            size_t offset = 0;
+            for ( uint32_t i = 0; i < 49 && offset + 5 <= valueSize; i++ ) {
+                const uint16_t entrySize = static_cast<uint16_t>( ( pValue[offset] << 8 ) | pValue[offset + 1] );
+                if ( entrySize != 3 ) {
+                    break;
+                }
+                faceParams[i] = static_cast<int8_t>( pValue[offset + 4] );
+                offset += 5;
+            }
+        }
+    }
 
     for ( const Worn &item : worn ) {
         const Bank *pBank = library.getClothesBank( item.File );
@@ -405,6 +424,19 @@ void EdenAvatar::draw( EdenRenderer &renderer, const Matrix4x4f &world,
     }
 }
 
+void EdenAvatar::setFacialCoefficients( const Vector4f &coef1, const Vector4f &coef2 ) {
+    static const uint64_t kCoef1 = GetIdentifier64bit( "facialAnimCoef1" ); // 0x4e72928698868e8f
+    static const uint64_t kCoef2 = GetIdentifier64bit( "facialAnimCoef2" ); // 0x4e73928698868e8f
+    for ( auto &pPart : parts ) {
+        for ( EdenMaterial &material : pPart->getMaterials() ) {
+            if ( material.ShaderSetGUID == 0xd5013ed0dbcddbcaull ) {
+                material.Parameters[kCoef1] = coef1;
+                material.Parameters[kCoef2] = coef2;
+            }
+        }
+    }
+}
+
 void EdenAvatar::applySkin( const BankEntry *pAvt ) {
     // .avt keys (FUN_00cbd030): 6cb0 SkinAmbiant, 1a6c SkinDiffuse, e173
     // SkinSpecular, cbfd (SpecCoeff, SpecPow, RIMCoeff), e9ce (DiffWrap,
@@ -447,6 +479,31 @@ void EdenAvatar::applySkin( const BankEntry *pAvt ) {
                 coeffs.z = wrap[1];
             }
             coeffs.y = freckle;
+        }
+    }
+    // FUN_00cb1830 (TD_Avatar d5013ed0db79dadb material "EYEBROW"): COLOR =
+    // EyebrowsColor (.avt c643, AvatarConfiguration +0x5c u8 RGBA) x
+    // 1/255 (float @0xf0c538); render states +0x44 / +0x45 = 2, +0x46 = 1.
+    // UVOFF comes from the EyebrowsID atlas table (filled by [ENC] code):
+    // the 2DM value is kept.
+    float eyebrows[4] = {};
+    if ( FindAvtFloats( pAvt, 0xc643, eyebrows, 4 ) >= 3 ) {
+        uint8_t bytes[4];
+        for ( uint32_t i = 0; i < 4; i++ ) {
+            // FUN_00cbd030 stores R, G, B as u8 (+0x5c..+0x5e) through 0x5bbd30
+            // [ENC] (INF: x 255, rounded); the alpha is not used by TD_Avatar.
+            bytes[i] = static_cast<uint8_t>( Clamp( eyebrows[i] * 255.0f + 0.5f, 0.0f, 255.0f ) );
+        }
+        const uint64_t colorId = GetIdentifier64bit( "COLOR" );
+        const uint64_t eyebrowId = GetIdentifier64bit( "EYEBROW" );
+        for ( auto &pPart : parts ) {
+            for ( EdenMaterial &material : pPart->getMaterials() ) {
+                if ( material.ShaderSetGUID == 0xd5013ed0db79dadbull && material.Hashcode == eyebrowId ) {
+                    material.Parameters[colorId] =
+                        Vector4f( bytes[0] * 0.0039215f, bytes[1] * 0.0039215f, bytes[2] * 0.0039215f,
+                                  bytes[3] * 0.0039215f );
+                }
+            }
         }
     }
 }

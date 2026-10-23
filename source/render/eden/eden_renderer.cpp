@@ -34,8 +34,27 @@ enum eSamplerHeapIndex : uint8_t {
     SH_PointWrap,
     SH_PointClamp,
     SH_LinearMirror,
-    SH_Count
+    // 2DM per-slot addressing (MaterialTextureSlot::AddressU / V): linear,
+    // SH_LinearUV + 3 * u + v with 0 wrap, 1 mirror, 2 clamp.
+    SH_LinearUV,
+    SH_Count = SH_LinearUV + 9
 };
+
+// D3DTADDRESS (1 wrap, 2 mirror, 3 clamp, 4 border, 5 mirror once) -> 0 wrap,
+// 1 mirror, 2 clamp (border / mirror once: clamp / mirror [INF], unused by
+// the 2DM files read).
+uint32_t AddressIndex( uint8_t d3dAddress ) {
+    switch ( d3dAddress ) {
+    case 2:
+    case 5:
+        return 1;
+    case 3:
+    case 4:
+        return 2;
+    default:
+        return 0;
+    }
+}
 
 VkFormat GetAttributeFormat( eVertexAttributeFormat format ) {
     switch ( format ) {
@@ -276,6 +295,14 @@ bool EdenRenderer::initialize( RenderDevice *pRenderDevice, TextureCache *pCache
     samplerHeap[SH_PointWrap] = pDevice->getSampler( eSamplerFilter::SF_Point, eSamplerAddress::SA_Wrap );
     samplerHeap[SH_PointClamp] = pDevice->getSampler( eSamplerFilter::SF_Point, eSamplerAddress::SA_Clamp );
     samplerHeap[SH_LinearMirror] = pDevice->getSampler( eSamplerFilter::SF_Linear, eSamplerAddress::SA_Mirror );
+    static const eSamplerAddress kAddress[3] = { eSamplerAddress::SA_Wrap, eSamplerAddress::SA_Mirror,
+                                                 eSamplerAddress::SA_Clamp };
+    for ( uint32_t u = 0; u < 3; u++ ) {
+        for ( uint32_t v = 0; v < 3; v++ ) {
+            samplerHeap[SH_LinearUV + 3 * u + v] =
+                pDevice->getSampler( eSamplerFilter::SF_Linear, kAddress[u], kAddress[v] );
+        }
+    }
 
     const VkDescriptorPoolSize staticSizes[] = { { VK_DESCRIPTOR_TYPE_SAMPLER, SH_Count } };
     VkDescriptorPoolCreateInfo poolInfo = {};
@@ -404,6 +431,12 @@ void EdenRenderer::setupMaterial( const MaterialDesc &desc, EdenMaterial &outMat
         const uint64_t textureHash = desc.AllTextures[i].TextureHashcode;
         outMaterial.bNormalSlot[i] =
             ToUpper( IdentifierToString( desc.AllTextures[i].SlotType ) ).find( "NORMAL" ) != std::string::npos;
+        // Slot addressing (2DM slot +0x18 / +0x19).
+        const uint32_t addressU = AddressIndex( desc.AllTextures[i].AddressU );
+        const uint32_t addressV = AddressIndex( desc.AllTextures[i].AddressV );
+        if ( addressU != 0 || addressV != 0 ) {
+            outMaterial.SamplerIndex[i] = static_cast<uint8_t>( SH_LinearUV + 3 * addressU + addressV );
+        }
         if ( textureHash == 0 ) {
             continue;
         }

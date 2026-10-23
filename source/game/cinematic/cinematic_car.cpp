@@ -81,10 +81,57 @@ void CinematicCar::unload() {
     doorAngle[0] = doorAngle[1] = 0.0f;
 }
 
-void CinematicCar::assignEnvironment( EdenRenderer &renderer, GPUTexture *pCube ) {
+void CinematicCar::assignEnvironment( EdenRenderer &, GPUTexture *pCube, bool bDynamic ) {
+    // Car environment cube binding (docs/re/car_glass_spec.md):
+    // FUN_00d58df0 (dynamic cube, DAT_011c9f00/04 + 0x48) and FUN_00d58d20
+    // (static cube, e.g. the garage CUBECAR) both end in FUN_00d58a90: for
+    // the materials of the car families below, FUN_00d56df0 replaces the
+    // texture of every slot whose texture hashcode is the default car cube
+    // (DAT_011f8e88: "CUBEMAP" of common_car.bnk [INF: the global is set in
+    // encrypted code; FUN_00c4b0e0 looks the default cube up by it]); other
+    // cubes (CUBEINT of the interior) are kept. When the texture changed
+    // and S_USEREFLECTION (spec 3) is set, FUN_00d58980 writes 1 (static
+    // cube) or 0 (dynamic cube) to SPECPARM.z (TD_CarPaint family) or
+    // RAMPPOW.z (TD_CarPaint2 family): the car shaders scale the
+    // reflection by (1 - cube.a * z).
+    static const uint64_t kDefaultCube = GetIdentifier64bit( "CUBEMAP" );
+    static const uint64_t kSpecParm = GetIdentifier64bit( "SPECPARM" );
+    static const uint64_t kRampPow = GetIdentifier64bit( "RAMPPOW" );
+    if ( pCube == nullptr ) {
+        return;
+    }
     for ( EdenModel *pModel : { &car, &interior, &rim, &rimRear, &tire } ) {
         for ( EdenMaterial &material : pModel->getMaterials() ) {
-            renderer.assignTexture( material, "REFLECTION", pCube );
+            const uint64_t family = material.ShaderSetGUID;
+            // FUN_00d58a90 family list (TD_Mirror only with the car +0x2ab6
+            // flag, 0 at creation [INF]: left out).
+            const bool bCarFamily = family == 0x183157b81c6c7357ull || family == 0xca00000000000010ull ||
+                                    family == 0x183157b81c6c5377ull || family == 0xdddddddd1c6c7357ull ||
+                                    family == 0xb39c35015789e65cull || family == 0xca00000000000020ull ||
+                                    family == 0x6638348331d66466ull || family == 0x1b38348331cacacaull;
+            if ( !bCarFamily ) {
+                continue;
+            }
+            bool bChanged = false;
+            for ( uint32_t i = 0; i < material.NumSlots; i++ ) {
+                if ( material.TextureHashes[i] == kDefaultCube && material.pTextures[i] != pCube ) {
+                    material.pTextures[i] = pCube;
+                    bChanged = true;
+                }
+            }
+            if ( !bChanged || material.Spec[3] == 0 ) {
+                continue;
+            }
+            uint64_t parameter = 0;
+            if ( family == 0x183157b81c6c7357ull || family == 0xca00000000000010ull || family == 0x1b38348331cacacaull ) {
+                parameter = kSpecParm;
+            } else if ( family == 0x183157b81c6c5377ull || family == 0x183157b81c6ccacaull ) {
+                parameter = kRampPow;
+            }
+            auto it = parameter != 0 ? material.Parameters.find( parameter ) : material.Parameters.end();
+            if ( it != material.Parameters.end() ) {
+                it->second.z = bDynamic ? 0.0f : 1.0f;
+            }
         }
     }
 }
