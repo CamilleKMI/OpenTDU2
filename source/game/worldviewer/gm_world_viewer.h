@@ -2,6 +2,7 @@
 
 #include "game/gm_base.h"
 #include "game/worldviewer/spot_exterior.h"
+#include "game/worldviewer/weather_controls.h"
 #include "render/eden/eden_scene_view.h"
 #include "render/eden/eden_weather.h"
 
@@ -13,8 +14,15 @@
 // Command line: -gm WORLD_VIEWER -island ibiza|hawai|casino (default ibiza),
 // -spot <spots.bin bank name> start spot (default: the first spot whose sector
 // bank is present), -campos x,y,z / -camyaw deg / -campitch deg,
-// -sectorradius n (default 1), -weather <game_weathers name> (default "14"),
-// -flyspeed m/s (default 50), -noexteriors (no spot exteriors).
+// -sectorradius n (default 1), -flyspeed m/s (default 50), -noexteriors (no
+// spot exteriors).
+// Weather (GSWeather time of day evaluation, WeatherSystem): -time hh:mm
+// (default 14:00), -timespeed x (game seconds per second, default 0 =
+// frozen; the game clock runs at 9.6), -intempery <name or 0..5> (Sunny,
+// Cloudy, Rainny, Before_rain, After_rain, Tempest; default Sunny),
+// -nextintempery <name or index> (next 2 h forecast slice, default = same),
+// -weather <name>: a game_weathers key ("14", "21.30": sets the time) or a
+// specific / cinematic weather ("INTRO", "Avatar": fixed preset).
 //
 // Controls (OpenTDU CameraMouse: look while a mouse button is held, keys
 // move along the view):
@@ -54,7 +62,8 @@ private:
     };
 
     EdenSceneView view;
-    WeatherLibrary gameWeathers;
+    // Time of day / weather + their panel (shared with FREE_DRIVE).
+    WeatherControls weather;
     const WeatherPreset *pWeather = nullptr;
     std::vector<Spot> spots;
     std::vector<std::unique_ptr<SpotExterior>> exteriors;
@@ -80,7 +89,6 @@ private:
     int32_t sectorRadius = 1;
     int32_t lastSectorKey = INT32_MIN;
     int32_t selectedSpot = -1;
-    int32_t selectedWeather = 0;
 
     bool loadIsland( const std::string &name );
     void unloadIsland();

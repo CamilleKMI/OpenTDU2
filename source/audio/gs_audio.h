@@ -112,6 +112,13 @@ public:
     // Same with an explicit time step (tests).
     void update( float deltaTime );
 
+    // Offline WAV dump (-audiodump): 32-bit float WAV of the mix, advanced
+    // by tickOffline( game time step ) (offline mixer only).
+    bool startDump( const char *pPath );
+    inline bool isDumping() const { return pDumpFile != nullptr; }
+    void tickOffline( float deltaTime );
+    void finishDump();
+
     // Mixes numFrames frames into pOut (interleaved, getOutputChannels()
     // channels, SDL order). Called by the device callback; usable directly
     // with initializeOffline().
@@ -173,6 +180,11 @@ private:
     bool bLogVoices = false;
     float logTimer = 0.0f;
     uint64_t lastTickNs = 0;
+
+    FILE *pDumpFile = nullptr;
+    uint64_t dumpFrames = 0;
+    double dumpRemainder = 0.0;
+    std::vector<float> dumpBuffer;
 
     mutable std::mutex mutex;
     std::vector<Voice> voices;

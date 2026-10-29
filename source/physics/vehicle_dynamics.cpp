@@ -1404,6 +1404,7 @@ void VehicleDynamics::resolveChassisCollision( float dt, const VehicleWorldColli
             if ( approach >= 0.0f ) {
                 continue;
             }
+            impactSpeed = Max( impactSpeed, -approach );
             const Vector3f armCrossNormal = arm.cross( contact.Normal );
             const float effective = 1.0f / mass + contact.Normal.dot( worldInverseInertia( armCrossNormal ).cross( arm ) );
             const float j = -( 1.0f + 0.05f ) * approach / Max( effective, 1e-6f );

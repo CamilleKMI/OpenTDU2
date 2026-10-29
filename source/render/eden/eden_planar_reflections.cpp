@@ -1,6 +1,8 @@
 #include "shared.h"
 #include "eden_planar_reflections.h"
 
+#include <algorithm>
+
 #include "render/eden/eden_model.h"
 #include "render/gs_render.h"
 #include "system/cmd_line.h"
@@ -59,6 +61,20 @@ void EdenPlanarReflections::destroy() {
 void EdenPlanarReflections::clear() {
     projectors.clear();
     materials.clear();
+}
+
+void EdenPlanarReflections::removeModel( EdenModel &model ) {
+    std::vector<EdenMaterial> &modelMaterials = model.getMaterials();
+    const EdenMaterial *pBegin = modelMaterials.data();
+    const EdenMaterial *pEnd = pBegin + modelMaterials.size();
+    materials.erase( std::remove_if( materials.begin(), materials.end(),
+                                     [&]( const RegisteredMaterial &entry ) {
+                                         return entry.pMaterial >= pBegin && entry.pMaterial < pEnd;
+                                     } ),
+                     materials.end() );
+    projectors.erase( std::remove_if( projectors.begin(), projectors.end(),
+                                      [&]( const Projector &projector ) { return projector.pModel == &model; } ),
+                      projectors.end() );
 }
 
 void EdenPlanarReflections::applyMaterial( EdenRenderer &renderer, const RegisteredMaterial &entry, bool bEnable ) {

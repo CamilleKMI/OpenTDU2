@@ -28,6 +28,9 @@ public:
     bool initialize( EdenRenderer &renderer );
     void destroy();
     inline bool isReady() const { return bReady; }
+    // Water plane height of the reflection (FUN_00963010: -1.8 on Hawai,
+    // else 0 [CODE]).
+    inline void setWaterHeight( float height ) { waterHeight = height; }
 
     // Noise normal map passes (outside render passes).
     void updateNormalMap( EdenRenderer &renderer, float deltaTime, const WeatherPreset *pWeather );
@@ -53,6 +56,7 @@ private:
     EdenMaterial normalMapMaterial;
     Matrix4x4f reflectionMatrix; // REFLMAT rows (column-vector convention)
     float phase = 0.0f;
+    float waterHeight = 0.0f;
     bool bReady = false;
 
     void pass( EdenRenderer &renderer, RenderTarget *pTarget, EdenMaterial &material, const EdenDrawParams &params );

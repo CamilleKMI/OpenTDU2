@@ -1,6 +1,9 @@
 #include "shared.h"
 #include "eden_model.h"
 
+#include <cinttypes>
+#include <unordered_set>
+
 #include "filesystem/bank.h"
 #include "render/gs_render.h"
 
@@ -100,10 +103,13 @@ bool EdenModel::load( EdenRenderer &renderer, const BankEntry &sceneEntry, const
     boundsMax = Vector3f( -1e9f, -1e9f, -1e9f );
     for ( int32_t nodeIndex = 0; nodeIndex < static_cast<int32_t>( nodes.size() ); nodeIndex++ ) {
         const SceneNode &node = nodes[nodeIndex];
-        if ( node.ObjectHashcode == 0 || ( filter && !filter( scene, nodeIndex ) ) ) {
+        const uint64_t objectHashcode =
+            lodLevel == 0 ? node.ObjectHashcode
+                          : ( lodLevel < node.LodObjects.size() ? node.LodObjects[lodLevel] : 0ull );
+        if ( objectHashcode == 0 || ( filter && !filter( scene, nodeIndex ) ) ) {
             continue;
         }
-        const Geometry *pGeometry = geometry.find( node.ObjectHashcode );
+        const Geometry *pGeometry = geometry.find( objectHashcode );
         if ( pGeometry == nullptr ) {
             continue;
         }
@@ -255,6 +261,35 @@ void EdenModel::drawNodeItems( EdenRenderer &renderer, int32_t nodeIndex, const 
     }
 }
 
+void EdenModel::drawNodeItemsSkinned( EdenRenderer &renderer, int32_t nodeIndex, const Matrix4x4f &world,
+                                      const Matrix4x4f *pBones, uint32_t numBones,
+                                      const EdenDrawParams *pParams ) const {
+    if ( nodeIndex < 0 || nodeIndex >= static_cast<int32_t>( nodeItems.size() ) ) {
+        return;
+    }
+    EdenDrawParams params;
+    if ( pParams != nullptr ) {
+        params = *pParams;
+    }
+    Matrix4x4f palette[32];
+    const auto &range = nodeItems[nodeIndex];
+    for ( uint32_t i = range.first; i < range.first + range.second; i++ ) {
+        const Item &item = items[i];
+        if ( item.BonePalette.empty() ) {
+            renderer.draw( item.Mesh, materials[item.MaterialIndex], world, pParams );
+            continue;
+        }
+        const uint32_t count = Min<uint32_t>( static_cast<uint32_t>( item.BonePalette.size() ), 32u );
+        for ( uint32_t b = 0; b < count; b++ ) {
+            const uint32_t bone = item.BonePalette[b];
+            palette[b] = bone < numBones ? pBones[bone] : Matrix4x4f::Identity();
+        }
+        params.pSkinMatrices = palette;
+        params.NumSkinMatrices = count;
+        renderer.draw( item.Mesh, materials[item.MaterialIndex], world, &params );
+    }
+}
+
 bool EdenModel::getNodeBounds( int32_t nodeIndex, Vector3f &outMin, Vector3f &outMax ) const {
     if ( nodeIndex < 0 || nodeIndex >= static_cast<int32_t>( nodeItems.size() ) || nodeItems[nodeIndex].second == 0 ) {
         return false;
@@ -301,40 +336,94 @@ void EdenModel::drawSkinned( EdenRenderer &renderer, const Matrix4x4f &world,
     }
 }
 
+uint32_t EdenModel::resolveMissingTextures( EdenRenderer &renderer ) {
+    uint32_t numResolved = 0;
+    for ( EdenMaterial &material : materials ) {
+        numResolved += renderer.resolveMissingTextures( material );
+    }
+    return numResolved;
+}
+
 uint32_t EdenModel::bindUVAnimations( const Bank &bank ) {
+    // Texture slot k of a material references its animation (2DM slot +0x1c
+    // -> MTP. -> UVA. id = the ANM! id of a bank .UVA file) and drives
+    // __UVA_k [DATA, see MaterialTextureSlot::UVAnimationId].
+    bool bReferenced = false;
+    for ( const EdenMaterial &material : materials ) {
+        for ( uint64_t id : material.UVAnimationIds ) {
+            bReferenced |= id != 0;
+        }
+    }
     const std::vector<uint64_t> &ids = localMaterials.getUVAnimationIds();
-    if ( ids.empty() ) {
+    if ( !bReferenced && ids.empty() ) {
         return 0;
     }
-    uint32_t numBound = 0;
+    std::unordered_map<uint64_t, std::pair<std::shared_ptr<EdenUVAnimation>, const BankEntry *>> animations;
     for ( const BankEntry *pEntry : bank.findEntriesByExtension( "uva" ) ) {
         auto pAnimation = std::make_shared<EdenUVAnimation>();
-        if ( !pAnimation->parse( pEntry->pData, pEntry->Size ) ||
-             std::find( ids.begin(), ids.end(), pAnimation->Id ) == ids.end() ) {
+        if ( pAnimation->parse( pEntry->pData, pEntry->Size ) ) {
+            animations.emplace( pAnimation->Id, std::make_pair( pAnimation, pEntry ) );
+        }
+    }
+    uint32_t numBound = 0;
+    std::unordered_set<uint64_t> boundIds;
+    for ( EdenMaterial &material : materials ) {
+        for ( uint32_t slot = 0; slot < 4; slot++ ) {
+            const uint64_t id = material.UVAnimationIds[slot];
+            if ( id == 0 ) {
+                continue;
+            }
+            auto it = animations.find( id );
+            if ( it == animations.end() ) {
+                OTDU_LOG_DEBUG( "EdenModel: '%s' slot %u: UV animation %016" PRIx64 " not in the bank\n",
+                                material.Name.c_str(), slot, id );
+                continue;
+            }
+            material.UVAnimations[slot] = it->second.first;
+            boundIds.insert( id );
+            numBound++;
+            OTDU_LOG_DEBUG( "EdenModel: '%s' UV animation '%s' (%.1f s) -> __UVA_%u\n", material.Name.c_str(),
+                            it->second.second->Name.c_str(), it->second.first->Duration, slot );
+        }
+    }
+    // A UVAA id that no texture slot of this model references (none seen in
+    // the data): file name rule <material>[_<SlotName>]_<k>.UVA [INF], kept
+    // as a fallback only.
+    for ( uint64_t id : ids ) {
+        auto it = animations.find( id );
+        if ( it == animations.end() || boundIds.count( id ) != 0 ) {
             continue;
         }
+        bool bSlotReference = false;
+        for ( const MaterialDesc &desc : localMaterials.getOrderedMaterials() ) {
+            for ( const MaterialTextureSlot &textureSlot : desc.AllTextures ) {
+                bSlotReference |= textureSlot.UVAnimationId == id;
+            }
+        }
+        if ( bSlotReference ) {
+            continue; // referenced by a material this model does not use
+        }
+        const BankEntry *pEntry = it->second.second;
         uint32_t slot = 0;
         std::vector<std::string> candidates;
         if ( !EdenUVAnimation::ParseName( pEntry->Name, slot, candidates ) || slot >= 4 ) {
             continue;
         }
-        bool bFound = false;
         for ( const std::string &candidate : candidates ) {
             const uint64_t hashcode = GetIdentifier64bit( candidate.c_str() );
+            bool bFound = false;
             for ( EdenMaterial &material : materials ) {
-                if ( material.Hashcode == hashcode ) {
-                    material.UVAnimations[slot] = pAnimation;
+                if ( material.Hashcode == hashcode && material.UVAnimations[slot] == nullptr ) {
+                    material.UVAnimations[slot] = it->second.first;
                     bFound = true;
                 }
             }
             if ( bFound ) {
+                numBound++;
+                OTDU_LOG_INFO( "EdenModel: UV animation '%s' bound by file name (no slot reference) -> __UVA_%u\n",
+                               pEntry->Name.c_str(), slot );
                 break;
             }
-        }
-        if ( bFound ) {
-            numBound++;
-            OTDU_LOG_DEBUG( "EdenModel: UV animation '%s' (%.1f s) -> __UVA_%u\n", pEntry->Name.c_str(),
-                            pAnimation->Duration, slot );
         }
     }
     return numBound;

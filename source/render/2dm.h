@@ -14,7 +14,9 @@
 //     +0x0b0 float4 Diffuse, Ambient, Specular, Emissive
 //     +0x0fc u8   NumTextureSlots
 //     +0x100 TextureSlot[n] { u64 SlotType ("DETAIL", "NORMAL", "GLOSS", "CUBEMAP"...);
-//                             u64 TextureHashcode; u32 runtime; u32; u8 filter/address... }
+//                             u64 TextureHashcode; u32 runtime; u32; u8 address U, V...;
+//                             +0x1c u32 MTP. offset (texture coordinate animation, see
+//                             MaterialTextureSlot::UVAnimationId) }
 //     +0x300 u64  ShaderSet GUID (.sob family), +0x308 shader version
 //     +0x310 u8   spec[48] (shader permutation switches, see EdenShaderSystem)
 //     +0x340 ParameterDesc[N] { u64 Name ("RAMPCLR1", "MATPARAM"...); u16 Type (2: float4);
@@ -29,6 +31,19 @@ struct MaterialTextureSlot {
     // one (ocean_fix_spec)]; 0 = not set.
     uint8_t AddressU = 0;
     uint8_t AddressV = 0;
+    // Texture coordinate animation of this slot (0: none) [DATA, every
+    // spot / sector 2DM with a UVAA section, e.g. ecas_sc_DB42CB20E8099A8F,
+    // eph_l3di_sc_C44A679762D76AA8]: slot +0x1c = file offset (REAL
+    // relocated) of an MTPA/MTP. payload { u32 1; u32[4] 0 at +0x04..+0x10
+    // except +0x14 = file offset of a UVAA/UVA. payload { u64 id; u64 0 } }.
+    // id = the ANM! header id of a .UVA file of the bank. The slot index i
+    // drives __UVA_i [DATA + SHADER: Neons_Curve (TD_NEONDECAL) slot 0 ->
+    // Neons_Curve_4.UVA with spec[8] (UV matrix mask) = 1 = __UVA_0 only;
+    // caustic (TD_Water) slot 0 / 1 -> caustic_0 / caustic_Normal1_1.UVA,
+    // vs uvN0 = TC0 * __UVA_0, uvN1 = TC1 * __UVA_1]. The number at the end
+    // of a .UVA file name is not the slot (Neons_Curve_4, Neons_Curve_01_3,
+    // Neons_Normal_2 all animate slot 0) [DATA].
+    uint64_t UVAnimationId = 0;
 };
 
 struct MaterialDesc {
@@ -81,6 +96,9 @@ private:
     std::unordered_map<uint64_t, MaterialDesc> materials;
     std::vector<MaterialDesc> orderedMaterials;
     std::vector<uint64_t> uvAnimationIds;
+    const uint8_t *pParseFile = nullptr; // file being parsed (slot offsets)
+    uint32_t parseFileSize = 0;
 
     void parseMaterial( const uint8_t *pPayload, uint32_t payloadSize );
+    static uint64_t ResolveSlotUVAnimation( const uint8_t *pFile, uint32_t fileSize, uint32_t mtpOffset );
 };

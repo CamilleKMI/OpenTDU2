@@ -190,6 +190,20 @@ int32_t TD_HardwareInstance( Context &c ) {
     return 0x15;
 }
 
+// 0x00d717e0 (TD_Impostor, table 0x00f8fdf0): no fog, slot 1 = runtime
+// texture (MAT +0x128 = 1, +0x130 = a global texture: gDissolveTexSampler of
+// the dissolve permutations), NumSlots (+0xfc) = 2.
+int32_t TD_Impostor( Context &c ) {
+    c.M( 0x3a ) = 6;
+    c.K( 0x25 ) = 1;
+    c.K( 0x1a ) = 0;
+    c.K( 0x14 ) = 0;
+    c.K( 0x1b ) = 0;
+    c.Material.NumSlots = Max<uint32_t>( c.Material.NumSlots, 2 );
+    c.Slot( 1 ) = kRuntimeTexture;
+    return kBucketDefault;
+}
+
 // 0x00d70be0 (TD_Gouraud, td_checkpoint)
 int32_t TD_Gouraud( Context &c ) {
     if ( c.K( 0x33 ) == 0 && c.K( 0x30 ) != 0 ) {
@@ -500,6 +514,7 @@ const HandlerEntry kHandlers[] = {
     { 0x0123000000000000ull, TD_Water },
     { 0x73078865ca37336dull, TD_Gouraud },
     { 0xcd453201027c8abaull, TD_HardwareInstance },
+    { 0x83078865caca336dull, TD_Impostor },
     { 0x0123210123210123ull, UVMask3 },
     { 0x0123210456210123ull, TD_WaterRiver },
     { 0x73078865ca31234dull, TD_WaterRiver },

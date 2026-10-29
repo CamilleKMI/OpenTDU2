@@ -15,6 +15,10 @@ enum class eGameMode : int32_t {
     GM_TestCar,       // "TESTCAR"
     GM_FirstWalkMode, // "FIRST_WM" (0x23): story step 1 "First Garage" (garage.bnk)
     GM_WorldViewer,   // "WORLD_VIEWER": OpenTDU2 developer tool (free-fly camera over an island), not a TDU2 mode
+    GM_Cine,          // "CINE" (0x1f): story cinematics at a spot (story steps 3, 5, 6)
+    GM_Mission,       // "MISSION" (4): events (story step 4 "Driving Tess", TESSEVEN)
+    GM_Shop,          // "SHOP" (3): car / clothes shops (story step 7 "Used Car Dealer": hand-off stub)
+    GM_FreeDrive,     // "FREE_DRIVE": OpenTDU2 developer / sandbox tool (drive any car on any island), not a TDU2 mode
 
     GM_Count
 };

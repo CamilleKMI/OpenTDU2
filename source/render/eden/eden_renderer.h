@@ -58,10 +58,21 @@ struct EdenMaterial {
     std::unordered_map<uint64_t, Vector4f> Parameters;
     // Texture coordinate animations by slot (__UVA_k; null: identity).
     std::shared_ptr<const EdenUVAnimation> UVAnimations[4];
+    // .UVA ids referenced by texture slots 0..3 (MaterialTextureSlot::
+    // UVAnimationId; 0: none), resolved by EdenModel::bindUVAnimations.
+    uint64_t UVAnimationIds[4] = {};
     // GSReflection projective map slot (TD_Water U4: 4, TD_Furnitures U7:
     // 6), -1: none. Bound to the frame projective texture (render target of
     // the REFLECT layers) when the renderer has one.
     int8_t ProjectiveSlot = -1;
+    // Runtime slot of the screen depth buffer (FullscreenDepthTarget,
+    // "gViewPos": B / A encoded view depth), -1: none. TD_Particle soft
+    // particle permutations (ps 2 / 3, sampler gZpass s1): the .2DM only
+    // has the COLOR slot, the depth is bound at draw time
+    // (docs/re/particles_spec.md 6). Bound to the frame screen texture
+    // (setScreenTexture) when there is one, else to the white default (B =
+    // A = 1: very far, no fade).
+    int8_t ScreenDepthSlot = -1;
     // Runtime constants by shader constant name, per stage (0 VS, 1 PS).
     std::unordered_map<std::string, std::vector<Vector4f>> StageConstants[2];
     Vector4f Diffuse = Vector4f( 1, 1, 1, 1 );
@@ -127,6 +138,28 @@ struct EdenDrawParams {
     const Matrix4x4f *pSkinMatrices = nullptr;
     uint32_t NumSkinMatrices = 0;
     const EdenAvatarLighting *pAvatarLighting = nullptr;
+    // Material parameter overrides of one model instance (parameter blocks
+    // attached to (material, model instance), FUN_00448310 [ENC]): used in
+    // place of material.Parameters[Parameter] for that material only (.pmi
+    // neon AnimValue, see EdenNeons).
+    struct MaterialVector {
+        const EdenMaterial *pMaterial = nullptr;
+        uint64_t Parameter = 0;
+        Vector4f Value;
+    };
+    std::vector<MaterialVector> MaterialVectors;
+    // Texture slot overrides of one model instance: the slot of type
+    // SlotType of the materials of shader set ShaderSetGUID samples pTexture
+    // with sampler heap index Sampler (the .pmi instance list override
+    // record list +0x7670 of FUN_00987e80 / FUN_00982af0: TD_Ground SHADOW =
+    // the sector -s map, D3DTADDRESS 2 / 2 [CODE], night_lighting_spec 2.1).
+    struct TextureOverride {
+        uint64_t ShaderSetGUID = 0;
+        uint64_t SlotType = 0;
+        GPUTexture *pTexture = nullptr;
+        uint16_t Sampler = 0;
+    };
+    std::vector<TextureOverride> TextureOverrides;
     // Blended draws with parameters are recorded immediately unless set
     // (then deferred and sorted with the other blended draws; the skin
     // matrices are copied).
@@ -146,6 +179,13 @@ public:
 
     // Builds the runtime material (shader permutation, textures) of a .2DM entry.
     void setupMaterial( const MaterialDesc &desc, EdenMaterial &outMaterial, const char *pTextureOwner = nullptr );
+    // Texture slots of a material whose 2DM texture was not loaded when the
+    // material was set up, looked up again by hashcode in every loaded bank
+    // (a spot exterior texture packed in another bank of the same spot:
+    // ECAS windows_05 REFLECTION "CUBEMAP" = spots/casino/ecas/maps/cubemap.2db
+    // of elandca.bnk, docs/re/spot_exterior_spec.md 5). Returns the number
+    // of slots resolved.
+    uint32_t resolveMissingTextures( EdenMaterial &material );
     // Runtime texture assignment (e.g. sector shadow maps), call updateProgram after.
     bool assignTexture( EdenMaterial &material, const char *pSlotType, GPUTexture *pTexture );
     void updateProgram( EdenMaterial &material );

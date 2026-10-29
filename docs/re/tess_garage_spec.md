@@ -545,7 +545,7 @@ No subtitle strings were found for the Tess voice lines (voices only) [DATA: no 
 | Intro_FiestaGarage_03..06 | intro_fiestagarage_03..06 (1.80, 3.57, 3.68, 3.63 s) | C_VOICE_03..06 at 0 |
 
   FaceFX: `female.fxa::Intro_:<same names>` (`intro-w.fxe`).
-- `meeting_tess.bnk` (`C_MEETING_TESS`, `C_MEETING_TESS_W`, 66.7 s, "the dream" wake-up) belongs to story step 3, not
+- `meeting_tess.bnk` (`C_MEETING_TESS`, `C_MEETING_TESS_W`, 66.7 s, "the dream" wake-up; `docs/re/story_spec.md`) belongs to story step 3, not
   this flow. `fade_freeride__us.bnk` contains the same 16 `intronew-e_meet_tess_*` voices as `meeting_tess__us.bnk`
   [DATA].
 

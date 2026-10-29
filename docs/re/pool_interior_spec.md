@@ -72,7 +72,9 @@ Other variants of the bank: `eph_l3di_low.bnk` (one LOD 3DD `eph_l3di_low_sc_A08
 UV animations [DATA]:
 - The 2DM `UVAA` section lists two `UVA.` entries. Their ids `0xfd398b99263a1775` and `0x7009d837_00035fb2` equal the
   ANM header ids of `caustic_0.UVA` and `caustic_Normal1_1.UVA`.
-- File name convention [INF from all bank files]: `<material>[_<SlotName>]_<slotIndex>.UVA`.
+- Binding [DATA, corrected in spot_exterior_spec 2]: texture slot i of the material (+0x1c -> MTP. -> UVA. id) names
+  the animation and drives `__UVA_i`. Here caustic slot 0 (NORMAL0) -> `caustic_0`, slot 1 (NORMAL1) ->
+  `caustic_Normal1_1`. The file name number is **not** the slot in general (ECAS `Neons_Curve_4` animates slot 0).
 
 Indoor pond `Oasis_02` (in `intro_lph_l3di_349E…` and `lph_l3di_sc_349E…`) [DATA]:
 - Same family. Spec has no prelight. REFLECTION = `env_lph_l3d.2db` (cube 256², 7 mips).
@@ -505,7 +507,7 @@ All are static; no runtime cube is involved for houses [DATA: 2DM hashes resolve
 
 **P2 — UVA**
 1. Parse `*.UVA` (§1.4) when loading a bank.
-2. Map each one to (material, slot) through the 2DM `UVAA`/`UVA.` id, or failing that the file name.
+2. Map each one to (material, slot) through the 2DM texture slot +0x1c -> `MTP.` -> `UVA.` id (spot_exterior_spec 2).
 3. Each frame write `__UVA_k` = rows `(su,0,0,offU)`, `(0,sv,0,offV)` with `t = time mod duration` and linear keys.
 4. This also animates the HOLOGRAMS pulses (Pulse_DarkBlue), the garage waterfalls and the artwork flipbook.
 

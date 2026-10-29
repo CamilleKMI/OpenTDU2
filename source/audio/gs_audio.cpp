@@ -170,6 +170,7 @@ bool GSAudio::initializeOffline( int32_t sampleRate, int32_t numChannels ) {
 }
 
 void GSAudio::shutdown() {
+    finishDump();
     if ( pDeviceStream != nullptr ) {
         SDL_DestroyAudioStream( pDeviceStream ); // closes the device
         pDeviceStream = nullptr;
@@ -539,6 +540,77 @@ void GSAudio::update( float deltaTime ) {
             }
         }
     }
+}
+
+namespace {
+void WriteWavHeader( FILE *pFile, int32_t rate, int32_t channels, uint64_t frames ) {
+    // RIFF WAVE, format 3 (IEEE float), 32 bits.
+    const uint32_t dataSize = static_cast<uint32_t>( Min<uint64_t>( frames * channels * 4ull, 0xffffff00ull ) );
+    const uint32_t riffSize = 36 + dataSize;
+    const uint16_t format = 3, numChannels = static_cast<uint16_t>( channels ), bits = 32;
+    const uint32_t sampleRate = static_cast<uint32_t>( rate );
+    const uint32_t byteRate = sampleRate * channels * 4;
+    const uint16_t blockAlign = static_cast<uint16_t>( channels * 4 );
+    const uint32_t fmtSize = 16;
+    fseek( pFile, 0, SEEK_SET );
+    fwrite( "RIFF", 1, 4, pFile );
+    fwrite( &riffSize, 4, 1, pFile );
+    fwrite( "WAVEfmt ", 1, 8, pFile );
+    fwrite( &fmtSize, 4, 1, pFile );
+    fwrite( &format, 2, 1, pFile );
+    fwrite( &numChannels, 2, 1, pFile );
+    fwrite( &sampleRate, 4, 1, pFile );
+    fwrite( &byteRate, 4, 1, pFile );
+    fwrite( &blockAlign, 2, 1, pFile );
+    fwrite( &bits, 2, 1, pFile );
+    fwrite( "data", 1, 4, pFile );
+    fwrite( &dataSize, 4, 1, pFile );
+}
+} // namespace
+
+bool GSAudio::startDump( const char *pPath ) {
+    finishDump();
+    if ( !bOffline || pPath == nullptr ) {
+        return false;
+    }
+    pDumpFile = fopen( pPath, "wb" );
+    if ( pDumpFile == nullptr ) {
+        OTDU_LOG_WARN( "Audio: cannot write '%s'\n", pPath );
+        return false;
+    }
+    dumpFrames = 0;
+    dumpRemainder = 0.0;
+    WriteWavHeader( pDumpFile, outputRate, outputChannels, 0 );
+    OTDU_LOG_INFO( "Audio: offline mix dumped to '%s' (%d Hz, %d channels)\n", pPath, outputRate, outputChannels );
+    return true;
+}
+
+void GSAudio::tickOffline( float deltaTime ) {
+    update( Clamp( deltaTime, 0.0f, 0.25f ) );
+    if ( pDumpFile == nullptr ) {
+        return;
+    }
+    dumpRemainder += static_cast<double>( deltaTime ) * outputRate;
+    const int32_t numFrames = static_cast<int32_t>( dumpRemainder );
+    dumpRemainder -= numFrames;
+    if ( numFrames <= 0 ) {
+        return;
+    }
+    dumpBuffer.resize( static_cast<size_t>( numFrames ) * outputChannels );
+    mixOffline( dumpBuffer.data(), numFrames );
+    fwrite( dumpBuffer.data(), sizeof( float ), dumpBuffer.size(), pDumpFile );
+    dumpFrames += static_cast<uint64_t>( numFrames );
+}
+
+void GSAudio::finishDump() {
+    if ( pDumpFile == nullptr ) {
+        return;
+    }
+    WriteWavHeader( pDumpFile, outputRate, outputChannels, dumpFrames );
+    fclose( pDumpFile );
+    pDumpFile = nullptr;
+    OTDU_LOG_INFO( "Audio: offline mix: %llu frames (%.2f s)\n", static_cast<unsigned long long>( dumpFrames ),
+                   static_cast<double>( dumpFrames ) / outputRate );
 }
 
 void GSAudio::mixOffline( float *pOut, int32_t numFrames ) {

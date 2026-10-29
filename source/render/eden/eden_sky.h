@@ -1,5 +1,6 @@
 #pragma once
 
+#include "filesystem/bank.h"
 #include "render/eden/eden_renderer.h"
 
 struct WeatherPreset;
@@ -30,8 +31,20 @@ public:
     static void setupAtmosphere( EdenSceneParams &scene, const WeatherPreset *pWeather );
     // Draw first (depth write off, at the far plane).
     void draw( EdenRenderer &renderer );
+    // Moon (MatMoon, td_moon, FUN_00c384f0 / FUN_0092ed80): camera facing
+    // quad of fx/weatherfx.bnk "MOON" at -sundirection * 100000, PosMoon.w =
+    // Skydome_moonPercent (alpha), SizeMoon.x = Skydome_moonSize * 10. Draw
+    // after the dome.
+    void drawMoon( EdenRenderer &renderer, const EdenSceneParams &scene, const WeatherPreset *pWeather );
 
 private:
+    Bank weatherFxBank;
+    GPUBuffer *pMoonVertexBuffer = nullptr;
+    GPUBuffer *pMoonIndexBuffer = nullptr;
+    EdenMesh moonMesh;
+    EdenMaterial moonMaterial;
+    bool bMoonReady = false;
+
     GPUBuffer *pVertexBuffer;
     GPUBuffer *pIndexBuffer;
     EdenMesh mesh;

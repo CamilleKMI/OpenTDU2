@@ -281,7 +281,7 @@ void VehicleWorldCollision::loadSector( int32_t row, int32_t column ) {
             OTDU_LOG_WARN( "VehicleWorldCollision: '%s' not readable\n", pEntry->Filename.c_str() );
             continue;
         }
-        addCollision( collision, Matrix4x4f::Translation( areaOrigin ), bRoad );
+        addCollision( collision, Matrix4x4f::Translation( areaOrigin ), bRoad, bRoad );
     }
     // Sector origin (EdenWorld::getSectorOrigin: odd rows shifted).
     const Vector3f sectorOrigin( ( areaX * kSectorsPerArea + sectorX ) * kSectorSize + ( ( sectorY & 1 ) ? kSectorSize * 0.5f : 0.0f ),
@@ -291,7 +291,8 @@ void VehicleWorldCollision::loadSector( int32_t row, int32_t column ) {
                    triangles.size() - firstTriangle, boxes.size() - firstBox, capsules.size() - firstCapsule );
 }
 
-void VehicleWorldCollision::addCollision( const HavokCollision &collision, const Matrix4x4f &toWorld, bool bRoad ) {
+void VehicleWorldCollision::addCollision( const HavokCollision &collision, const Matrix4x4f &toWorld, bool bRoad,
+                                          bool bSectorRoad ) {
     for ( const HavokCollision::Body &body : collision.Bodies ) {
         for ( uint32_t t = body.FirstTriangle; t < body.FirstTriangle + body.NumTriangles; t++ ) {
             Triangle triangle;
@@ -308,6 +309,7 @@ void VehicleWorldCollision::addCollision( const HavokCollision &collision, const
             }
             triangle.Friction = body.Friction;
             triangle.bRoad = bRoad;
+            triangle.bSectorRoad = bSectorRoad;
             const uint32_t index = static_cast<uint32_t>( triangles.size() );
             triangles.push_back( triangle );
             const Vector3f boundsMin( Min( triangle.A.x, Min( triangle.B.x, triangle.C.x ) ), 0.0f,
@@ -572,7 +574,8 @@ bool VehicleWorldCollision::sphereContact( const Vector3f &center, float radius,
 
 void VehicleWorldCollision::forEachRoadTriangle(
     const Vector3f &center, float radius,
-    const std::function<void( const Vector3f &, const Vector3f &, const Vector3f & )> &callback ) const {
+    const std::function<void( const Vector3f &, const Vector3f &, const Vector3f & )> &callback,
+    bool bSectorRoadsOnly ) const {
     const int32_t x0 = static_cast<int32_t>( std::floor( ( center.x - radius ) / kCellSize ) );
     const int32_t x1 = static_cast<int32_t>( std::floor( ( center.x + radius ) / kCellSize ) );
     const int32_t z0 = static_cast<int32_t>( std::floor( ( center.z - radius ) / kCellSize ) );
@@ -586,7 +589,7 @@ void VehicleWorldCollision::forEachRoadTriangle(
             }
             for ( uint32_t index : it->second ) {
                 const Triangle &triangle = triangles[index];
-                if ( triangle.bRoad && seen.insert( index ).second ) {
+                if ( triangle.bRoad && ( !bSectorRoadsOnly || triangle.bSectorRoad ) && seen.insert( index ).second ) {
                     callback( triangle.A, triangle.B, triangle.C );
                 }
             }

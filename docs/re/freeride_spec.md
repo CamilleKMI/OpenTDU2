@@ -111,6 +111,8 @@ CinProps 32, CinEnd 3; cin `fade_blanc_M_FADE_FREERIDE.cin` 15.0 s, one shot on 
 (fade to white [INF from the cin name]); Fx at 2.68 s `FxIntroNew-E_Meet_Tess_02_00` (12.34 s); actor WOMAN (Tess,
 `ev_tessincar_toplayer01_npc.anm`) with two voice Fx at 3.90 / 10.17; `s_toctoc_CINEMATIC.wav` (knock on the window).
 `fade_blanc_57E5C829CCD9F2C6.shk` collision. The 16 `IntroNew-E_Meet_Tess_*` Fx roots are the step-3 voices.
+Its end (listener FUN_00b10580, event 7: story +0x700 = 1) → story step 3 "Meeting Tess" (game mode CINE,
+`docs/re/story_spec.md` §2–3). Implemented: the white fade [INF] held while C_FADE_FREERIDE plays its Fx, then CINE.
 
 ---------------------------------------------------------------------------------------------------
 ## 2. Car simulation

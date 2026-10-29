@@ -458,6 +458,12 @@ void EdenRenderer::setupMaterial( const MaterialDesc &desc, EdenMaterial &outMat
         outMaterial.SlotTypes[i] = i < desc.AllTextures.size() ? desc.AllTextures[i].SlotType : 0;
     }
     outMaterial.NumSlots = static_cast<uint32_t>( Min<size_t>( desc.AllTextures.size(), 16 ) );
+    // Texture coordinate animation per slot (2DM slot +0x1c -> MTP. -> UVA.
+    // id); slot i drives __UVA_i (EdenModel::bindUVAnimations).
+    for ( size_t i = 0; i < 4; i++ ) {
+        outMaterial.UVAnimationIds[i] = i < desc.AllTextures.size() ? desc.AllTextures[i].UVAnimationId : 0;
+        outMaterial.UVAnimations[i] = nullptr;
+    }
 
     // Load time preparation of the original renderer (GUID / switches /
     // render states rewritten by the shader family handler).
@@ -489,6 +495,21 @@ void EdenRenderer::applyRenderStates( EdenMaterial &material ) {
     if ( material.ShaderSetGUID == 0x132435465768798aull && ( material.CullMode == 2 || material.CullMode == 3 ) ) {
         material.CullMode = material.CullMode == 2 ? 4 : 2;
     }
+}
+
+uint32_t EdenRenderer::resolveMissingTextures( EdenMaterial &material ) {
+    uint32_t numResolved = 0;
+    for ( uint32_t i = 0; i < material.NumSlots; i++ ) {
+        if ( material.pTextures[i] != nullptr || material.TextureHashes[i] == 0 ||
+             material.ProjectiveSlot == static_cast<int8_t>( i ) ) {
+            continue;
+        }
+        if ( GPUTexture *pTexture = pTextureCache->find( material.TextureHashes[i] ) ) {
+            material.pTextures[i] = pTexture;
+            numResolved++;
+        }
+    }
+    return numResolved;
 }
 
 bool EdenRenderer::assignTexture( EdenMaterial &material, const char *pSlotType, GPUTexture *pTexture ) {
@@ -619,6 +640,15 @@ void EdenRenderer::draw( const EdenMesh &mesh, const EdenMaterial &material, con
         return;
     }
     if ( bReflectionPass && ( material.isBlended() || material.ShaderSetGUID == 0x0cea000000000002ull ) ) {
+        return;
+    }
+    // Bucket 0x38 = SHADOWCASTERONLY (TD_ShadowCaster handler 0x00d70f30
+    // for GUID ac78df32bc4589df; bucket names 0x00f7f604, entry index =
+    // bucket + 1) [CODE + DATA]: drawn by the shadow map layers only
+    // (e.g. "5067Shadow_tunn", the caster hull over the Ibiza road 792
+    // tunnel, sector-5-0-6-7-o).
+    static constexpr int32_t kBucketShadowCasterOnly = 0x38;
+    if ( !bShadowCaster && material.Bucket == kBucketShadowCasterOnly ) {
         return;
     }
     if ( bShadowCaster ) {
@@ -1109,8 +1139,20 @@ void EdenRenderer::fillConstants( const std::vector<ShaderConstantMember> &membe
         } else {
             // Material parameter (.2DM): Eden identifier of the upper case name.
             const std::string baseName = StripSuffix( name );
-            auto it = material.Parameters.find( GetIdentifier64bit( baseName.c_str() ) );
-            if ( it != material.Parameters.end() ) {
+            const uint64_t parameterId = GetIdentifier64bit( baseName.c_str() );
+            const Vector4f *pOverride = nullptr;
+            if ( pParams != nullptr ) {
+                for ( const EdenDrawParams::MaterialVector &entry : pParams->MaterialVectors ) {
+                    if ( entry.pMaterial == &material && entry.Parameter == parameterId ) {
+                        pOverride = &entry.Value;
+                        break;
+                    }
+                }
+            }
+            auto it = material.Parameters.find( parameterId );
+            if ( pOverride != nullptr ) {
+                WriteVector( pOut, *pOverride );
+            } else if ( it != material.Parameters.end() ) {
                 WriteVector( pOut, it->second );
             } else if ( Logger::IsVerbose() ) {
                 const std::string warnKey = std::string( pProgramName ) + "|" + name;
@@ -1216,13 +1258,29 @@ void EdenRenderer::recordDraw( const EdenMesh &mesh, const EdenMaterial &materia
         imageInfos[i].imageView = pTexture->View;
         imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
+    uint16_t samplerIndices[16];
+    for ( uint32_t i = 0; i < 16; i++ ) {
+        samplerIndices[i] = material.SamplerIndex[i];
+    }
     for ( uint32_t i = 0; i < kNumPSImages; i++ ) {
         GPUTexture *pSource = material.pTextures[i];
+        if ( pParams != nullptr && i < material.NumSlots ) {
+            for ( const EdenDrawParams::TextureOverride &entry : pParams->TextureOverrides ) {
+                if ( entry.ShaderSetGUID == material.ShaderSetGUID && entry.SlotType == material.SlotTypes[i] &&
+                     entry.pTexture != nullptr ) {
+                    pSource = entry.pTexture;
+                    samplerIndices[i] = entry.Sampler;
+                }
+            }
+        }
         if ( pSource == nullptr && i == 15 ) {
             pSource = pShadowRealTimeOverride != nullptr ? pShadowRealTimeOverride : pShadowRealTime;
         } else if ( pSource == nullptr && pScreenTexture != nullptr && i < material.NumSlots &&
                     material.TextureHashes[i] == 1ull && material.ShaderSetGUID == 0x132435465768798aull ) {
             // Runtime screen buffer slots (TD_ShadowBox gViewPos...)
+            pSource = pScreenTexture;
+        } else if ( pSource == nullptr && material.ScreenDepthSlot == static_cast<int8_t>( i ) ) {
+            // Soft particles: gZpass = FullscreenDepthTarget (particles_spec 6).
             pSource = pScreenTexture;
         } else if ( pSource == nullptr && material.ProjectiveSlot == static_cast<int8_t>( i ) ) {
             // GSReflection projective map (FUN_00d7c030: the RT colour of
@@ -1267,7 +1325,7 @@ void EdenRenderer::recordDraw( const EdenMesh &mesh, const EdenMaterial &materia
     const uint32_t alphaRef = material.AlphaRef;
     memcpy( pushData + kPushAlphaRefOffset, &alphaRef, sizeof( alphaRef ) );
     for ( uint32_t i = 0; i < 16; i++ ) {
-        const uint16_t samplerIndex = material.SamplerIndex[i];
+        const uint16_t samplerIndex = samplerIndices[i];
         memcpy( pushData + kPushSamplerOffset + i * 2, &samplerIndex, sizeof( samplerIndex ) );
     }
 

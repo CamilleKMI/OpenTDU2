@@ -2,6 +2,7 @@
 #include "eden_shadows.h"
 #include "system/cmd_line.h"
 
+#include "render/shaders/builtin/headlightblit_frag.h"
 #include "render/shaders/builtin/shadowcombine_frag.h"
 
 #include "render/eden/eden_weather.h"
@@ -235,7 +236,7 @@ void EdenShadows::renderCasters( EdenRenderer &renderer, const EdenSceneParams &
 }
 
 GPUTexture *EdenShadows::resolve( EdenRenderer &renderer, const EdenSceneParams &scene, GPUTexture *pViewPos,
-                                  const WeatherPreset *pWeather ) {
+                                  const WeatherPreset *pWeather, GPUTexture *pHeadLights ) {
     if ( !bReady || pViewPos == nullptr ) {
         return nullptr;
     }
@@ -302,6 +303,11 @@ GPUTexture *EdenShadows::resolve( EdenRenderer &renderer, const EdenSceneParams 
     const float combineParams[4] = { splits[0], splits[1], splits[2], debugSlice };
     combinePass.draw( device, kSPIRV_shadowcombine_frag, sizeof( kSPIRV_shadowcombine_frag ), textures, 4,
                       combineParams, sizeof( combineParams ), eBlendMode::BM_Opaque, eSamplerFilter::SF_Point );
+    // HEADLIGHTS BLIT: HeadLightsRT into G / B (added, docs/re/car_lights_spec.md 8).
+    if ( pHeadLights != nullptr ) {
+        combinePass.draw( device, kSPIRV_headlightblit_frag, sizeof( kSPIRV_headlightblit_frag ), &pHeadLights, 1,
+                          nullptr, 0, eBlendMode::BM_Additive, eSamplerFilter::SF_Point );
+    }
     device.endRenderTarget();
     return &pScreenShadow->Color;
 }

@@ -65,6 +65,7 @@ private:
     std::vector<GSAudio::VoiceHandle> voices;
     std::vector<std::unique_ptr<EdenModel>> sets;
     std::vector<Prop> props;
+    EdenSceneView *pView = nullptr; // GSReflection registrations of the models
     Matrix4x4f sceneOrigin;
     Quaternionf sceneRotation;
     Vector3f housePosition;

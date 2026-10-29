@@ -110,14 +110,15 @@ Default_KB.xmb has DevType = DevSubType = 0 for all 76 entries. With the keyboar
 - Additive `getLastDevice()` (keyboard/mouse vs pad).
 - [INF] It is a convenience. The original uses the configured controller (§3).
 
-**Not changed:** `ResolveCommand` in gm_first_walk_mode.cpp (another engineer's file). It still emits the keyboard form, which is correct for Default_KB. With a pad key map, it should emit `FlashPlayer::PadChannelMarkup(entry.ChannelName)` when DevSubType == 3.
+**Not changed:** `ResolveCommand` (now `ResolveGameCommand` in `source/input/game_key_map.cpp`). It still emits the keyboard form, which is correct for Default_KB. With a pad key map, it should emit `FlashPlayer::PadChannelMarkup(entry.ChannelName)` when DevSubType == 3.
 
 ## 7. OpenTDU2 user binding: main-row 4 for ACCESSORIES_LEFT (not game data)
 
 User request (Mac keyboard without numpad): the door action ACCESSORIES_LEFT (Default_KB `PAD_4`,
 "4 (PAVE NUM.)") also answers the **main-row 4** key. This is an OpenTDU2 binding, not from the game files.
 
-- `kUserBindings` in `gm_first_walk_mode.cpp`: `{ACCESSORIES_LEFT, ChannelName "4", ChannelLocName "4"}`, put
+- `kUserBindings` in `source/input/game_key_map.cpp` (moved from `gm_first_walk_mode.cpp`; the accessory
+  bindings 8 / 6 / 2 of `docs/re/accessories_spec.md` §2 are there too): `{ACCESSORIES_LEFT, ChannelName "4", ChannelLocName "4"}`, put
   before the Default_KB entries of the action. The resolver takes the first entry (§1), so the tip reads
   **`[4]`**; numpad 4 (`PAD_4`) still opens the door.
 - Names as the game writes them for that key [DATA]:

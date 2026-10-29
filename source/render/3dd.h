@@ -26,6 +26,11 @@ struct SceneNode {
     // INS. +0x4e u16 numLOD, +0x50 + k * 0x14 { u32 pObjectHashEntry; f32
     // distance (squared, x (16/9)^2 at runtime: FUN_00da0440) }.
     std::vector<float> LodDistances;
+    // Object (OBJA hash, = .3DG geometry hash) of each LOD: LOD 0 is
+    // ObjectHashcode; the last LOD of the library trees is a TD_Impostor
+    // quad, of buildings / walls a TD_HardwareInstance mesh (docs/re/
+    // lod_impostor_spec.md). 0: entry not found.
+    std::vector<uint64_t> LodObjects;
 };
 
 class Render3DD {

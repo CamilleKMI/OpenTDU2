@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cctype>
+
 #include "flash/flash_definitions.h"
 
 class FlashMovie;
@@ -60,8 +62,26 @@ public:
         bool toBool() const;
     };
 
+    // Eden VMF ActionScript (AS1) names are case-insensitive: the engine sets
+    // "/:state_Metric" (0xf17f34, FUN at 0xa920e7) that SHOPSCAR reads as
+    // "state_metric", SetMiniMenu pushes to "SetBt" for "setBt" [CODE + DATA].
+    struct NameLess {
+        bool operator()( const std::string &a, const std::string &b ) const {
+            const size_t n = a.size() < b.size() ? a.size() : b.size();
+            for ( size_t i = 0; i < n; i++ ) {
+                const int ca = std::tolower( static_cast<unsigned char>( a[i] ) );
+                const int cb = std::tolower( static_cast<unsigned char>( b[i] ) );
+                if ( ca != cb ) {
+                    return ca < cb;
+                }
+            }
+            return a.size() < b.size();
+        }
+    };
+
     struct Object {
-        std::map<std::string, Value> Members;
+        std::map<std::string, Value, NameLess> Members;
+        bool bArray = false; // Array object: "length" kept by push / indexed set
     };
 
     struct Instance {
@@ -84,7 +104,7 @@ public:
         uint32_t CurrentFrame = 0;
         bool bPlaying = true;
         std::map<uint16_t, std::unique_ptr<Instance>> DisplayList;
-        std::map<std::string, Value> Variables;
+        std::map<std::string, Value, NameLess> Variables;
     };
 
 public:
@@ -115,6 +135,9 @@ public:
     void setVariableBool( const std::string &path, bool bValue );
     void setVariableNumber( const std::string &path, double value );
     std::string getVariable( const std::string &path );
+    // Typed copy of a variable (e.g. between two movies, FUN_00d80ba0 dbxo).
+    Value getVariableValue( const std::string &path );
+    void setVariableValue( const std::string &path, const Value &value );
     bool gotoLabel( const std::string &clipPath, const std::string &label, bool bPlay );
     Clip *findClip( const std::string &path );
 
@@ -125,6 +148,12 @@ public:
     // Calls an ActionScript function of a clip ("/" root, "/cursor"...) with
     // string arguments (game -> movie calls such as ItemType('over')).
     bool invoke( const std::string &clipPath, const std::string &function, const std::vector<std::string> &args );
+    // Same on the clip held by a variable (e.g. "/:Clip", the input focus
+    // clip of SHOPSCAR.vmf whose A() / B() are the pad buttons).
+    bool invokeOnClipVariable( const std::string &variablePath, const std::string &function,
+                               const std::vector<std::string> &args );
+    // Path of the clip held by a variable ("" if none), e.g. "/cursor/mini_menu".
+    std::string getClipVariablePath( const std::string &variablePath );
     // MovieClip _visible (edFlash vfunc +0x20 on a clip).
     bool setClipVisible( const std::string &clipPath, bool bVisible );
     bool sendMouseRelease( float screenX, float screenY );
@@ -138,6 +167,7 @@ private:
         std::vector<std::pair<uint8_t, std::string>> RegisterParameters; // DefineFunction2
         uint16_t Flags = 0;
         std::vector<std::string> Constants; // constant pool at definition
+        Clip *pScope = nullptr;             // clip whose actions defined it (closure scope)
     };
 
     struct PendingAction {
@@ -172,6 +202,10 @@ private:
     void initClip( Instance &instance, Clip *pParent, bool bQueueActions );
     void registerTextBitmap( const Instance &instance );
     void runPendingActions();
+    // MovieClip.onEnterFrame handlers (AS1: called once per movie frame on the
+    // clips that hold one, e.g. SHOPSCAR cmon_loader upcart polling
+    // _root.CanEnterCar).
+    void dispatchEnterFrame();
     bool resolveFrame( Clip &clip, const Value &frame, uint32_t &outFrame );
 
     // ActionScript
@@ -197,7 +231,7 @@ private:
     void beginStage( Renderer2D &renderer ) const;
     void drawClip( Renderer2D &renderer, const Clip &clip, const FlashMatrix &matrix,
                    const FlashColorTransform &colorTransform, const FlashMatrix &stageToCanvas );
-    void drawInstance( Renderer2D &renderer, const Instance &instance, const FlashMatrix &matrix,
+    void drawInstance( Renderer2D &renderer, const Instance &instance, const Clip &owner, const FlashMatrix &matrix,
                        const FlashColorTransform &colorTransform, const FlashMatrix &stageToCanvas );
     void drawShape( Renderer2D &renderer, const FlashShape &shape, const FlashMatrix &matrix,
                     const FlashColorTransform &colorTransform, const FlashMatrix &stageToCanvas );

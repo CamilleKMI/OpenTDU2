@@ -3,6 +3,7 @@
 
 #include "core/xmb.h"
 #include "filesystem/gs_file.h"
+#include "system/cmd_line.h"
 
 namespace {
 // Rotation matrix (columns x, y, z) -> quaternion.
@@ -186,9 +187,22 @@ EdenSceneView::Camera ChaseCamera::update( float deltaTime, const Matrix4x4f &ca
         const float targH = Lerp1( p.TargOffsetH, p.TargMaxOffsetH, t );
         eye = carPosition + heading * posOffset + Vector3f( 0.0f, posH, 0.0f );
         target = carPosition + heading * targOffset + Vector3f( 0.0f, targH, 0.0f );
-        // Keep the eye above the ground [INF].
+        // -chaseorbit <deg>: OpenTDU2 test aid, the eye turned about the car
+        // (vertical axis) and aimed at it (side views for screenshots).
+        static const int32_t orbitDeg = CmdLine::GetArgInt( "-chaseorbit", 0 );
+        if ( orbitDeg != 0 ) {
+            const Matrix4x4f orbit = Matrix4x4f::FromQuaternion(
+                Quaternionf::FromAxisAngle( Vector3f( 0.0f, 1.0f, 0.0f ), static_cast<float>( orbitDeg ) * kDegToRad ) );
+            eye = carPosition + orbit.transformVector( eye - carPosition );
+            target = carPosition + Vector3f( 0.0f, targH, 0.0f );
+        }
+        // Keep the eye above the ground [INF], unless the car itself is
+        // under the island heightfield (tunnels, docs/re/car_lights_spec.md 6).
         float height = 0.0f;
-        if ( ground && ground( eye.x, eye.z, height ) && eye.y < height + 0.5f ) {
+        float carGround = 0.0f;
+        const bool bUnderGround = ground && ground( carPosition.x, carPosition.z, carGround ) &&
+                                  carPosition.y < carGround - 2.0f;
+        if ( !bUnderGround && ground && ground( eye.x, eye.z, height ) && eye.y < height + 0.5f ) {
             eye.y = height + 0.5f;
         }
     }

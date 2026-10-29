@@ -103,6 +103,47 @@ Quaternionf CinematicScene::Object::sampleRotation( float time ) const {
     return Quaternionf( r.x / length, r.y / length, r.z / length, r.w / length );
 }
 
+Quaternionf CinematicScene::getOriginRotation() const {
+    // Columns of the rotation (column-vector convention) -> quaternion.
+    const Vector3f cx = origin.transformVector( Vector3f( 1.0f, 0.0f, 0.0f ) ).normalized();
+    const Vector3f cy = origin.transformVector( Vector3f( 0.0f, 1.0f, 0.0f ) ).normalized();
+    const Vector3f cz = origin.transformVector( Vector3f( 0.0f, 0.0f, 1.0f ) ).normalized();
+    const float r00 = cx.x, r10 = cx.y, r20 = cx.z;
+    const float r01 = cy.x, r11 = cy.y, r21 = cy.z;
+    const float r02 = cz.x, r12 = cz.y, r22 = cz.z;
+    const float trace = r00 + r11 + r22;
+    Quaternionf q;
+    if ( trace > 0.0f ) {
+        const float s = std::sqrt( trace + 1.0f ) * 2.0f;
+        q = Quaternionf( ( r21 - r12 ) / s, ( r02 - r20 ) / s, ( r10 - r01 ) / s, 0.25f * s );
+    } else if ( r00 > r11 && r00 > r22 ) {
+        const float s = std::sqrt( 1.0f + r00 - r11 - r22 ) * 2.0f;
+        q = Quaternionf( 0.25f * s, ( r01 + r10 ) / s, ( r02 + r20 ) / s, ( r21 - r12 ) / s );
+    } else if ( r11 > r22 ) {
+        const float s = std::sqrt( 1.0f + r11 - r00 - r22 ) * 2.0f;
+        q = Quaternionf( ( r01 + r10 ) / s, 0.25f * s, ( r12 + r21 ) / s, ( r02 - r20 ) / s );
+    } else {
+        const float s = std::sqrt( 1.0f + r22 - r00 - r11 ) * 2.0f;
+        q = Quaternionf( ( r02 + r20 ) / s, ( r12 + r21 ) / s, 0.25f * s, ( r10 - r01 ) / s );
+    }
+    return q;
+}
+
+bool CinematicScene::Object::sampleVisibility( float time, bool defaultValue ) const {
+    const Track *pTrack = findTrack( kTrackVisibility );
+    if ( pTrack == nullptr || pTrack->KeySize < 1 || pTrack->Times.empty() ) {
+        return defaultValue;
+    }
+    bool bVisible = defaultValue;
+    for ( size_t k = 0; k < pTrack->Times.size(); k++ ) {
+        if ( pTrack->Times[k] > time ) {
+            break;
+        }
+        bVisible = pTrack->Bytes[k * pTrack->KeySize] != 0;
+    }
+    return bVisible;
+}
+
 float CinematicScene::Object::sampleFloat( uint32_t trackId, float time, float defaultValue ) const {
     const Track *pTrack = findTrack( trackId );
     if ( pTrack == nullptr || pTrack->NumComponents < 1 || pTrack->Times.empty() ) {
@@ -199,6 +240,8 @@ bool CinematicScene::parseScene( const uint8_t *pData, size_t size ) {
                 for ( uint32_t k = 0; k < numKeys * track.NumComponents; k++ ) {
                     track.Values.push_back( ReadAt<float>( pChunk, valuesOffset + k * 4 ) );
                 }
+                track.KeySize = keySize;
+                track.Bytes.assign( pChunk + valuesOffset, pChunk + valuesOffset + static_cast<size_t>( keySize ) * numKeys );
                 object.Tracks.push_back( std::move( track ) );
             }
             trackOffset += trackSize;
@@ -435,7 +478,10 @@ bool Cinematic::getCamera( const std::vector<CinematicScene> &scenes, float time
     // Camera local time = start + (t - shot start), within the shot range.
     const float localTime = Min( pShot->getSceneTime( time ), Max( pShot->CameraEnd, pShot->CameraStart ) );
     outPosition = scene.getOrigin().transformPoint( pCamera->samplePosition( localTime ) );
-    outRotation = pCamera->sampleRotation( localTime );
+    // Eden heading in the parent frame: q * conj(origin rotation) (identity
+    // for scenes without an origin rotation).
+    const Quaternionf origin = scene.getOriginRotation();
+    outRotation = pCamera->sampleRotation( localTime ) * Quaternionf( -origin.x, -origin.y, -origin.z, origin.w );
     outFov = pCamera->sampleFloat( CinematicScene::kTrackFov, localTime, 60.0f ) * kDegToRad;
     return true;
 }

@@ -4,6 +4,7 @@
 #include "audio/gs_audio.h"
 #include "database/gs_database.h"
 #include "filesystem/gs_file.h"
+#include "flash/gs_flash.h"
 #include "game/player_profile.h"
 #include "input/gs_input.h"
 #include "physics/havok_collision.h"
@@ -18,7 +19,8 @@
 namespace {
 // Story step 2 timer (DAT_00ede78c) [CODE].
 constexpr float kFirstFreerideTime = 90.0f;
-// C_FADE_FREERIDE ("fade_blanc"): fade to white [INF duration].
+// C_FADE_FREERIDE ("fade_blanc"): fade to white [INF duration; the
+// cinematic itself lasts 15.0 s, docs/re/story_spec.md 2].
 constexpr float kFadeDuration = 2.0f;
 
 Quaternionf Conjugate( const Quaternionf &q ) { return Quaternionf( -q.x, -q.y, -q.z, q.w ); }
@@ -72,6 +74,31 @@ bool GMFreeRide::surfaceHeight( float x, float z, float y, float &outHeight ) co
 
 bool GMFreeRide::enter( TestDriveGameInstance *pInstance ) {
     GameMode::enter( pInstance );
+    if ( GetPlayerProfile().StoryStep == 8 ) {
+        // Story step 8 "Tuto FROG" (FUN_00b10da0 case 9, docs/re/story_spec.md
+        // 5.3) [CODE]: profile+0x58 = 8, FREERIDE at the dealer exit
+        // (FUN_00a6a650 on ESTOL_B_1275I: the spot exit snapped on the road),
+        // the exit cinematic DAT_0102582c = "C_INSTALL_FROG" of estol_b.bnk
+        // (set by the purchase, FUN_00ddea60), bank pack_freerideFROG, timer
+        // 300 s, GPS cleared, goal TUTO_FROG (4034 "Bank the first level with
+        // the F.R.I.M."), Todd Bishop as passenger (FUN_00b10d00
+        // "SPT_Todd_Bishop" -> FUN_00b84590); tick: FROG tutorial voices
+        // (FUN_00b10890), done -> step 9 "Go Home". Not implemented: stub.
+        bStep8Stub = true;
+        const PlayerProfile &profile = GetPlayerProfile();
+        const OwnedCar *pCar = profile.CurrentGarageSlot >= 0 &&
+                                       static_cast<size_t>( profile.CurrentGarageSlot ) < profile.Garage.size()
+                                   ? &profile.Garage[static_cast<size_t>( profile.CurrentGarageSlot )]
+                                   : nullptr;
+        step8Text = "Story step 8: Tuto FROG (FREERIDE) - not implemented";
+        OTDU_LOG_INFO( "FREERIDE: story step 8 'Tuto FROG': current car %d (garage slot %d of %zu), money %d, exit "
+                       "cinematic C_INSTALL_FROG at ESTOL_B_1275I: not implemented (hand-off stub, "
+                       "docs/re/story_spec.md 5.3)\n",
+                       pCar != nullptr ? pCar->IdCar : -1, profile.CurrentGarageSlot, profile.Garage.size(),
+                       profile.Money );
+        gpRender->setClearColor( ColorRGBA( 0.0f, 0.0f, 0.0f, 1.0f ) );
+        return true;
+    }
     // FUN_00b10da0 case 3 (0xc0c0): profile+0x58 = 2, current car 0x183.
     GetPlayerProfile().StoryStep = 2;
     if ( !outro.locate() ) {
@@ -81,6 +108,10 @@ bool GMFreeRide::enter( TestDriveGameInstance *pInstance ) {
     if ( !view.initialize( "ibiza", outro.getHousePosition(), radius ) ) {
         return false;
     }
+    // Island ambient effects of the streamed sectors (-F.pmi + fx/vfx_env.bnk,
+    // Particles service FUN_00c38b10); -noworldfx: off.
+    view.getWorld().setEffectsEnabled( !CmdLine::HasArg( "-noworldfx" ) );
+    roads.load( "ibiza" );
     // In-game weather: game_weathers.xmb time of day presets; the clock is
     // [ENC] -> "14" [INF].
     gameWeathers.load( ( gpFile->getBankFolder() + "islands/ibiza/fx/game_weathers.xmb" ).c_str() );
@@ -94,6 +125,9 @@ bool GMFreeRide::enter( TestDriveGameInstance *pInstance ) {
     if ( !outro.load( view ) ) {
         OTDU_LOG_WARN( "FREERIDE: house spot / C_FIRST_OUTRO not available\n" );
     }
+    // Step 2 enter: FUN_00b9ff50("Scenarics\\Cinematics", "\\intro\\fade_freeride")
+    // into the step scene slot (C_FADE_FREERIDE).
+    fade.load();
     car.load( carDesc );
 
     // Driving collision: sector .shk / -R.shk + the spot collision
@@ -114,6 +148,8 @@ bool GMFreeRide::enter( TestDriveGameInstance *pInstance ) {
     setupVehicle();
     chase.load( setup.CameraId != 0 ? setup.CameraId : setup.Db.CarId );
     hud.load( hudFileName() );
+    // Accessories menu, roof, windows, blinkers (docs/re/accessories_spec.md).
+    accessories.load( carDesc.FileName, car );
 
     view.setDrawCallback( [this]( EdenRenderer &renderer, EdenSceneView::ePass pass ) {
         outro.draw( renderer );
@@ -358,7 +394,9 @@ void GMFreeRide::startDriving() {
     // pop_goal 0x13ae (5038 "Enjoy!"), TUTO_ENJOY, roof open, timer 90 s.
     hud.setVisible( true );
     hud.showGoal( LocStr( 5038, "Enjoy!" ) );
-    stepTimer = kFirstFreerideTime;
+    // -steptimer s: test shortcut (the story timer is 90 s, DAT_00ede78c).
+    stepTimer = CmdLine::HasArg( "-steptimer" ) ? static_cast<float>( CmdLine::GetArgInt( "-steptimer", 90 ) )
+                                                : kFirstFreerideTime;
     state = eState::Drive;
     setShadowConfig( "FREERIDE" );
     OTDU_LOG_INFO( "FREERIDE: driving from (%.2f, %.2f, %.2f) at %.1f km/h, story timer %.0f s\n", position.x, position.y,
@@ -403,6 +441,9 @@ void GMFreeRide::updateWheels() {
 }
 
 void GMFreeRide::tick( float deltaTime ) {
+    if ( bStep8Stub ) {
+        return;
+    }
     if ( !bLoaded ) {
         return;
     }
@@ -432,6 +473,7 @@ void GMFreeRide::tick( float deltaTime ) {
         } else {
             input.Brake = 1.0f;
         }
+        lastBrakeInput = input.Brake;
         vehicle.step( deltaTime, input, collision );
         carWorld = vehicle.getWorldMatrix();
         streamWorld( carWorld.getTranslation() );
@@ -444,12 +486,28 @@ void GMFreeRide::tick( float deltaTime ) {
                 state = eState::Fade;
                 fadeTime = 0.0f;
                 hud.closeGoal();
-                OTDU_LOG_INFO( "FREERIDE: 90 s elapsed -> C_FADE_FREERIDE (story step 3 'Meeting Tess' not implemented)\n" );
+                // C_FADE_FREERIDE: listener story +0x14 (FUN_00b10580),
+                // +0x628 = 1, +0xb54 = 0, start (FUN_00b40180).
+                fade.start( carWorld );
+                OTDU_LOG_INFO( "FREERIDE: 90 s elapsed -> C_FADE_FREERIDE (%.2f s)\n",
+                               fade.isLoaded() ? fade.getDuration() : 0.0f );
             }
         } else {
             fadeTime += deltaTime;
-            if ( fadeTime >= kFadeDuration ) {
+            fade.tick( deltaTime );
+            // FUN_00b10580 (event 7 of C_FADE_FREERIDE): story +0x700 = 1 ->
+            // next tick vfunc8(3): story step 3 "Meeting Tess" (FUN_00b10da0
+            // case 4: profile+0x58 = 3, FUN_00b105d0, car 0x183, CINE request
+            // kind 1 with the story callback, mode 0x1f CINE). Without the
+            // bank: at the end of the white fade.
+            const bool bEnded = fade.isLoaded() ? fade.isEnded() : fadeTime >= kFadeDuration;
+            if ( bEnded && !bCineRequested ) {
+                bCineRequested = true;
                 GetPlayerProfile().StoryStep = 3;
+                GetCineRequest().Kind = 1;
+                GetCineRequest().bStoryCallback = true;
+                OTDU_LOG_INFO( "FREERIDE: end of C_FADE_FREERIDE -> story step 3 'Meeting Tess' (CINE)\n" );
+                pGameInstance->setNextGameMode( eGameMode::GM_Cine );
             }
         }
         static const bool bLogDrive = CmdLine::HasArg( "-logdrive" );
@@ -466,6 +524,26 @@ void GMFreeRide::tick( float deltaTime ) {
     }
     }
     updateWheels();
+    // FUN_00929be0 (menus / accessory keys, driving only) and the car roof /
+    // windows / blinker state (FUN_00c67c60) every frame.
+    accessories.tick( deltaTime, state == eState::Drive, car, hud );
+    // Car lights (docs/re/car_lights_spec.md): brake (+0x1d0) / reverse
+    // (+0x1d1) state from the vehicle [INF: brake pedal > 0, reverse gear],
+    // blinker timer (FUN_00c57ef0).
+    car.setBraking( state != eState::Outro && lastBrakeInput > 0.0f );
+    car.setReverse( state != eState::Outro && vehicle.getGear() == -1 );
+    car.updateLights( deltaTime );
+    // Projected headlight (HEADLIGHTS pass, docs/re/car_lights_spec.md 8).
+    {
+        std::vector<EdenSceneView::HeadlightSpot> spots;
+        EdenSceneView::HeadlightSpot spot;
+        if ( state != eState::Outro && car.getHeadlightSpot( carWorld, camera.Position, spot ) ) {
+            spots.push_back( spot );
+        }
+        view.setHeadlightSpots( spots );
+    }
+    // Tunnel (FUN_00c62a70, docs/re/car_lights_spec.md 6).
+    car.setTunnelDistance( roads.getCarTunnelDistance( carWorld.getTranslation(), camera.Position ), deltaTime );
 
     FreeRideHud::State hudState;
     hudState.SpeedKmh = state == eState::Outro ? 0.0f : vehicle.getSpeedKmh();
@@ -496,6 +574,9 @@ void GMFreeRide::tick( float deltaTime ) {
 }
 
 void GMFreeRide::drawOffscreen() {
+    if ( bStep8Stub ) {
+        return;
+    }
     EdenRenderer *pRenderer = gpRender->getEdenRenderer();
     if ( !bLoaded || pRenderer == nullptr ) {
         return;
@@ -515,6 +596,14 @@ void GMFreeRide::drawOffscreen() {
 }
 
 void GMFreeRide::draw() {
+    if ( bStep8Stub ) {
+        Renderer2D &renderer = gpRender->get2DRenderer();
+        renderer.begin();
+        renderer.drawText( gpFlash->getTitleFont(), step8Text.c_str(), 640.0f, 340.0f, 28.0f, 0xffffffffu,
+                           eTextAlign::TA_Center );
+        renderer.end();
+        return;
+    }
     if ( !bLoaded ) {
         return;
     }
@@ -537,10 +626,12 @@ void GMFreeRide::exit() {
         return;
     }
     hud.unload();
+    fade.unload();
     outro.unload();
     car.unload();
     view.destroy();
     collision.clear();
+    roads.unload();
     bLoaded = false;
 }
 

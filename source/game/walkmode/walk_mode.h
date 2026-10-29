@@ -35,6 +35,16 @@ public:
     using SelectableFilter = std::function<bool( int32_t index )>;
     void setSelectableFilter( SelectableFilter filter ) { selectableFilter = std::move( filter ); }
     inline int32_t getSelected() const { return selected; }
+    // Called when the selection changes, before /:SelItemType and
+    // ItemType('over') (the selectable wrapper vf14 sets its own movie
+    // variables first, e.g. the shop car data FUN_00da50e0); -1: none.
+    using SelectionCallback = std::function<void( int32_t index )>;
+    // FUN_0094f440 end: the walk HUD movie (+0xd10) gets gotoAndPlay("on" /
+    // "off") on its "cursor" clip (selected / none) [CODE: 0x94f78a..0x94f7b0];
+    // the SHOPSCAR cursor then calls ItemAction -> ItemType itself. Without
+    // it (INTRO.vmf modes) ItemType('over' / 'out') is called on the root.
+    void setCursorLabels( bool bEnable ) { bCursorLabels = bEnable; }
+    void setSelectionCallback( SelectionCallback callback ) { selectionCallback = std::move( callback ); }
     // /:SelItemType of the selection ("garage", "car"...), empty if none.
     const char *getSelectedType( const IntroCinematic &scene ) const;
 
@@ -45,6 +55,8 @@ private:
     int32_t selected = -1;
     float cooldown = 0.0f;
     SelectableFilter selectableFilter;
+    SelectionCallback selectionCallback;
+    bool bCursorLabels = false;
 
     Vector3f collide( const IntroCinematic &scene, const Vector3f &from, const Vector3f &to ) const;
     void updateSelection( IntroCinematic &scene, float deltaTime );

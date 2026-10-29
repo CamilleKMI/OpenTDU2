@@ -17,7 +17,13 @@
 #include "game/avatarchoice/gm_avatar_choice.h"
 #include "game/firstwalkmode/gm_first_walk_mode.h"
 #include "game/freeride/gm_freeride.h"
+#include "game/freedrive/gm_free_drive.h"
 #include "game/worldviewer/gm_world_viewer.h"
+#include "game/cine/gm_cine.h"
+#include "game/mission/gm_mission.h"
+#include "game/shop/gm_shop.h"
+#include "game/shop/gm_testcar.h"
+#include "game/player_profile.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -181,7 +187,12 @@ bool TestDriveGameInstance::initialize() {
     }
 
     pAudio = std::make_unique<GSAudio>();
-    if ( !CmdLine::HasArg( "-noaudio" ) ) {
+    if ( const char *pDump = CmdLine::GetArgValue( "-audiodump" ) ) {
+        // Offline mixer (no device) written to a WAV file, advanced by the
+        // game time step (tests without an audio device).
+        pAudio->initializeOffline( 48000, 2 );
+        pAudio->startDump( pDump );
+    } else if ( !CmdLine::HasArg( "-noaudio" ) ) {
         pAudio->initialize();
     }
 
@@ -209,6 +220,31 @@ bool TestDriveGameInstance::initialize() {
     }
     if ( CmdLine::HasArg( "-intro" ) ) {
         firstGameMode = eGameMode::GM_AvatarChoice;
+    }
+    // -storystep n: start at the game mode of story step n (FUN_00b10da0
+    // enter events): 0 AVATAR_CHOICE, 1 FIRST_WM, 2 FREERIDE, 3 CINE kind 1
+    // (C_MEETING_TESS), 4 MISSION (TESSEVEN), 5 CINE kind 2
+    // (C_SOLAR_CROWN_E), 6 CINE kind 3 (C_SOLAR_CROWN_I), 7 SHOP (Todd
+    // Bishop's used car dealer), 8 FREERIDE "Tuto FROG" (hand-off stub).
+    // Later steps are not implemented.
+    if ( CmdLine::HasArg( "-storystep" ) ) {
+        const int32_t step = CmdLine::GetArgInt( "-storystep", 0 );
+        static const eGameMode kStepModes[] = { eGameMode::GM_AvatarChoice, eGameMode::GM_FirstWalkMode,
+                                                eGameMode::GM_FreeRide,     eGameMode::GM_Cine,
+                                                eGameMode::GM_Mission,      eGameMode::GM_Cine,
+                                                eGameMode::GM_Cine,         eGameMode::GM_Shop,
+                                                eGameMode::GM_FreeRide };
+        static const int32_t kStepCineKinds[] = { 0, 0, 0, 1, 0, 2, 3, 0, 0 };
+        if ( step >= 0 && step < 9 ) {
+            firstGameMode = kStepModes[step];
+            GetPlayerProfile().StoryStep = step;
+            if ( kStepCineKinds[step] != 0 ) {
+                GetCineRequest().Kind = kStepCineKinds[step];
+                GetCineRequest().bStoryCallback = true;
+            }
+        } else {
+            OTDU_LOG_WARN( "-storystep %d: story step not implemented (0..8)\n", step );
+        }
     }
     setNextGameMode( firstGameMode );
     return true;
@@ -258,6 +294,16 @@ std::unique_ptr<GameMode> TestDriveGameInstance::createGameMode( eGameMode mode 
         return std::make_unique<GMFreeRide>();
     case eGameMode::GM_WorldViewer:
         return std::make_unique<GMWorldViewer>();
+    case eGameMode::GM_Cine:
+        return std::make_unique<GMCine>();
+    case eGameMode::GM_Mission:
+        return std::make_unique<GMMission>();
+    case eGameMode::GM_Shop:
+        return std::make_unique<GMShop>();
+    case eGameMode::GM_TestCar:
+        return std::make_unique<GMTestCar>();
+    case eGameMode::GM_FreeDrive:
+        return std::make_unique<GMFreeDrive>();
     default:
         OTDU_LOG_WARN( "Game mode '%s' is not implemented yet\n", GetGameModeName( mode ) );
         return nullptr;
@@ -281,6 +327,12 @@ void TestDriveGameInstance::switchToNextGameMode() {
     OTDU_LOG_ALWAYS( "|              GAME MODE : %s\n", GetGameModeName( mode ) );
     OTDU_LOG_ALWAYS( "--------------------------------------------------\n" );
 
+    // DAT_00fd5080 +0x12c = +0x128 when the mode changes (the story / shop
+    // code tests the previous mode, e.g. FUN_009f4ab0 C_INTRO_I after TESTCAR).
+    if ( mode != currentGameMode ) {
+        previousGameMode = currentGameMode;
+    }
+    currentGameMode = mode;
     pActiveGameMode = createGameMode( mode );
     if ( pActiveGameMode != nullptr && !pActiveGameMode->enter( this ) ) {
         OTDU_LOG_ERROR( "Failed to enter game mode '%s'\n", GetGameModeName( mode ) );
@@ -329,7 +381,9 @@ void TestDriveGameInstance::mainLoop() {
         float deltaTime = static_cast<float>( ( counter - lastCounter ) / frequency );
         lastCounter = counter;
         if ( bFixedTimestep ) {
-            deltaTime = 1.0f / 60.0f;
+            // -fixeddt <ms>: test aid, larger fixed steps (clamped to 0.1 s below).
+            static const int32_t fixedMs = CmdLine::GetArgInt( "-fixeddt", 0 );
+            deltaTime = fixedMs > 0 ? static_cast<float>( fixedMs ) / 1000.0f : 1.0f / 60.0f;
         }
         deltaTime = Clamp( deltaTime, 0.0001f, 0.1f );
         totalTime += deltaTime;
@@ -346,7 +400,11 @@ void TestDriveGameInstance::mainLoop() {
         if ( pActiveGameMode != nullptr ) {
             pActiveGameMode->tick( deltaTime );
         }
-        pAudio->tick();
+        if ( pAudio->isDumping() ) {
+            pAudio->tickOffline( deltaTime );
+        } else {
+            pAudio->tick();
+        }
 
         if ( screenshotFrame >= 0 && static_cast<int64_t>( frameIndex ) == screenshotFrame ) {
             pRender->getDevice().requestScreenshot( screenshotPath.c_str() );
@@ -428,7 +486,7 @@ void TestDriveGameInstance::runAutoplay() {
         { "steerleft", eInputAction::IA_CarLeft },     { "steerright", eInputAction::IA_CarRight },
         { "handbrake", eInputAction::IA_CarHandBrake }, { "camera", eInputAction::IA_CarCamera },
         { "walk", eInputAction::IA_AvatarForward },    { "walkleft", eInputAction::IA_AvatarLeft },
-        { "walkright", eInputAction::IA_AvatarRight },
+        { "walkright", eInputAction::IA_AvatarRight }, { "backontrack", eInputAction::IA_BackOnTrack },
     };
     for ( const AutoplayCommand &command : autoplay ) {
         if ( command.Frame != frameIndex ) {

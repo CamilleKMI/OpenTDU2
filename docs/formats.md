@@ -97,6 +97,13 @@ triangle winding).
 { u64 slot type, u64 texture hash }, +0x340 parameters { u64 name, u16 type, u16 flags, u32 size }`
 followed by float4 values (e.g. `RAMPCLR1` paint color).
 
+### PRT v0x1b (particle systems) and BFX (fx graphs)
+
+`.prt`: a `.PRT` section (force block, generator, sprite renderer, curve set found by their type identifiers in
+the name table) + a `MAT.` section (u64 material hash of the PrtMat `.2DM`, shader TD_Particle). `.bfx`: the edFx
+node tree of an `Fx__SourceData` (sound " DNS" nodes, particle nodes with a transform and the .prt system id).
+Layout and the meaning of each field: `docs/re/particles_spec.md` (the engine itself is encrypted).
+
 ## VMF (Eden flash movies, `FrontEnd/<Res>/*.bnk`)
 
 `FMV` + version, stage size in twips, fps 8.8, frame count, optional preload table, then SWF style records.

@@ -155,7 +155,11 @@ const char *WalkMode::getSelectedType( const IntroCinematic &scene ) const {
 
 void WalkMode::clearSelection( IntroCinematic &scene ) {
     if ( selected >= 0 ) {
-        scene.getUi().invoke( "/", "ItemType", { "out" } );
+        if ( bCursorLabels ) {
+            scene.getUi().gotoLabel( "/cursor", "off", true );
+        } else {
+            scene.getUi().invoke( "/", "ItemType", { "out" } );
+        }
     }
     selected = -1;
 }
@@ -202,12 +206,20 @@ void WalkMode::updateSelection( IntroCinematic &scene, float deltaTime ) {
         return;
     }
     FlashPlayer &ui = scene.getUi();
-    if ( selected >= 0 ) {
+    if ( selected >= 0 && !bCursorLabels ) {
         ui.invoke( "/", "ItemType", { "out" } );
     }
     selected = best;
     cooldown = kSelectionCooldown;
-    if ( best >= 0 ) {
+    if ( selectionCallback ) {
+        selectionCallback( best );
+    }
+    if ( bCursorLabels ) {
+        if ( best >= 0 ) {
+            ui.setVariable( "/:SelItemType", ItemTypeOf( selectables[best] ) );
+        }
+        ui.gotoLabel( "/cursor", best >= 0 ? "on" : "off", true );
+    } else if ( best >= 0 ) {
         ui.setVariable( "/:SelItemType", ItemTypeOf( selectables[best] ) );
         ui.invoke( "/", "ItemType", { "over" } );
     }

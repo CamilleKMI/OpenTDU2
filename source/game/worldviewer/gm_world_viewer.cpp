@@ -1,6 +1,7 @@
 #include "shared.h"
 #include "gm_world_viewer.h"
 
+#include "audio/gs_audio.h"
 #include "debug/gs_imgui.h"
 #include "filesystem/gs_file.h"
 #include "game/freeride/chase_camera.h"
@@ -68,6 +69,7 @@ bool GMWorldViewer::enter( TestDriveGameInstance *pInstance ) {
     GameMode::enter( pInstance );
     sectorRadius = Clamp( CmdLine::GetArgInt( "-sectorradius", 1 ), 0, 4 );
     bExteriors = !CmdLine::HasArg( "-noexteriors" );
+    bShowPanel = !CmdLine::HasArg( "-nopanel" );
     if ( const char *pSpeed = CmdLine::GetArgValue( "-flyspeed" ) ) {
         baseSpeed = Clamp( static_cast<float>( atof( pSpeed ) ), 1.0f, 5000.0f );
     }
@@ -79,6 +81,11 @@ bool GMWorldViewer::enter( TestDriveGameInstance *pInstance ) {
     if ( !IsKnownIsland( name ) ) {
         OTDU_LOG_WARN( "WORLD_VIEWER: unknown island '%s' (ibiza, hawai, casino), using ibiza\n", name.c_str() );
         name = "ibiza";
+    }
+    // Audio mix: the World Viewer stands for the free roaming mode (game mode
+    // FREERIDE -> mix preset of audiosetup.xmb) [INF].
+    if ( gpAudio != nullptr && gpAudio->isReady() ) {
+        gpAudio->setGameMode( "FREERIDE" );
     }
     // The command line camera applies to the first island only.
     loadIsland( name );
@@ -193,6 +200,8 @@ bool GMWorldViewer::loadIsland( const std::string &name ) {
         return false;
     }
     view.getWorld().setIslandTerrainEnabled( true );
+    // Island ambient effects (-F.pmi + fx/vfx_env.bnk); -noworldfx: off.
+    view.getWorld().setEffectsEnabled( !CmdLine::HasArg( "-noworldfx" ) );
     view.setDrawCallback( [this]( EdenRenderer &renderer, EdenSceneView::ePass pass ) {
         if ( pass == EdenSceneView::ePass::ProjectorActors ) {
             return;
@@ -201,27 +210,20 @@ bool GMWorldViewer::loadIsland( const std::string &name ) {
             pExterior->draw( renderer );
         }
     } );
-    // Island weather: game_weathers.xmb time of day presets, "14" by default
-    // like FREERIDE [INF: the clock is encrypted].
-    gameWeathers = WeatherLibrary();
-    gameWeathers.load( ( gpFile->getBankFolder() + "islands/" + island + "/fx/game_weathers.xmb" ).c_str() );
-    const char *pWeatherName = CmdLine::GetArgValue( "-weather" );
-    pWeather = gameWeathers.find( pWeatherName != nullptr ? pWeatherName : "14" );
-    if ( pWeather == nullptr && !gameWeathers.getPresets().empty() ) {
-        pWeather = &gameWeathers.getPresets().front();
-    }
-    if ( pWeather == nullptr ) {
-        // No game weather: the first cinematic weather of the island.
-        pWeather = !view.getWeathers().getPresets().empty() ? &view.getWeathers().getPresets().front() : nullptr;
-    }
-    selectedWeather = 0;
-    for ( size_t i = 0; i < gameWeathers.getPresets().size(); i++ ) {
-        if ( &gameWeathers.getPresets()[i] == pWeather ) {
-            selectedWeather = static_cast<int32_t>( i );
-        }
-    }
+    // Island weather: GSWeather evaluation of game_weathers.xmb (time keys x
+    // intemperies, WeatherSystem), plus the fixed presets of
+    // specific_weathers.xmb / cinematic_weathers.xmb (WeatherControls).
+    weather.load( island );
+    weather.applyArguments( view, "WORLD_VIEWER" );
+    pWeather = weather.getInitialWeather( view );
     view.setWeather( pWeather );
     view.setShadowConfig( EdenShadows::FindConfig( "FREERIDE" ) );
+    // GSReflection (pool refraction / planar mirrors of the spot exteriors):
+    // off like FREERIDE (mode 1, table 0x00f817e0), the free roaming mode
+    // this tool stands for; -gsreflection turns it on (the value of the
+    // SPOT_VIEWER / LIVING / CASINO... modes) for comparisons.
+    view.setPlanarReflectionsEnabled( CmdLine::HasArg( "-gsreflection" ) ||
+                                      EdenPlanarReflections::IsEnabledForGameMode( 0x01 ) );
     lastSectorKey = SectorKey( position );
     bWorldReady = true;
     const EdenWorld &world = view.getWorld();
@@ -365,6 +367,7 @@ void GMWorldViewer::streamWorld( bool bForce ) {
 void GMWorldViewer::streamExteriors() {
     // Spots sharing a bank share one SpotExterior (one frame per spot).
     bool bUnloaded = false;
+    bool bLoadedAny = false;
     for ( auto it = exteriors.begin(); it != exteriors.end(); ) {
         bool bKeep = false;
         for ( const Spot &spot : spots ) {
@@ -372,6 +375,11 @@ void GMWorldViewer::streamExteriors() {
                      HorizontalDistance( spot.Position, position ) < kExteriorUnloadDistance;
         }
         if ( !bKeep ) {
+            // Slots resolved from the other exteriors' banks (one of them
+            // may own the texture): looked up again below.
+            for ( auto &pOther : exteriors ) {
+                pOther->clearForeignTextures();
+            }
             it = exteriors.erase( it );
             bUnloaded = true;
         } else {
@@ -414,7 +422,24 @@ void GMWorldViewer::streamExteriors() {
                     Matrix4x4f::FromQuaternion( Quaternionf::FromAxisAngle( Vector3f( 0.0f, 1.0f, 0.0f ), other.Heading ) ) );
             }
         }
+        pExterior->registerReflections( view );
+        if ( EdenRenderer *pRenderer = gpRender->getEdenRenderer() ) {
+            pExterior->startEffects( *pRenderer );
+        }
         exteriors.push_back( std::move( pExterior ) );
+        bLoadedAny = true;
+    }
+    if ( bLoadedAny || bUnloaded ) {
+        // Textures of a spot packed in another exterior bank of the same
+        // place (ECAS windows_05 REFLECTION "CUBEMAP" -> elandca.bnk).
+        if ( EdenRenderer *pRenderer = gpRender->getEdenRenderer() ) {
+            for ( auto &pExterior : exteriors ) {
+                if ( const uint32_t numResolved = pExterior->resolveForeignTextures( *pRenderer ) ) {
+                    OTDU_LOG_INFO( "WORLD_VIEWER: %s: %u texture slot(s) resolved from the other exterior banks\n",
+                                   pExterior->getPath().c_str(), numResolved );
+                }
+            }
+        }
     }
 }
 
@@ -430,15 +455,25 @@ void GMWorldViewer::tick( float deltaTime ) {
     }
     streamWorld( false );
     streamExteriors();
+    for ( auto &pExterior : exteriors ) {
+        pExterior->update( deltaTime );
+    }
 
     EdenSceneView::Camera camera;
     camera.Position = position;
     camera.Rotation = ChaseCamera::LookRotation( position, position + getForward() );
     camera.Fov = fovDegrees * kPi / 180.0f;
     view.setCamera( camera );
-    view.setWeather( pWeather );
+    // Clock + weather (FUN_00af8ce0 / FUN_00af8f60): the evaluated weather,
+    // the forecast cloud sets, the game time of the frame (clouds), the rain.
+    pWeather = weather.tick( deltaTime, view );
     view.setEnvironmentCenter( position, false );
     view.tick( deltaTime );
+    // Listener = the free-fly camera (GSAudio::SetListener FUN_00d944b0,
+    // camera listener FUN_00c3e530).
+    if ( gpAudio != nullptr ) {
+        gpAudio->setListener( position, getForward(), Vector3f() );
+    }
 }
 
 void GMWorldViewer::drawOffscreen() {
@@ -491,6 +526,7 @@ void GMWorldViewer::drawUI() {
         ImGui::Text( "missing sector banks skipped: %zu%s", world.getNumFailedSectors(),
                      world.hasIslandTerrain() ? ", island heightfield" : "" );
         ImGui::Text( "sector-%d-%d-%d-%d", id.AreaX, id.AreaY, id.X, id.Y );
+        ImGui::Text( "ambient effects: %u placed, %u running", world.getNumEffects(), world.getNumRunningEffects() );
     }
     ImGui::Separator();
     ImGui::Text( "pos %.1f %.1f %.1f", position.x, position.y, position.z );
@@ -508,17 +544,7 @@ void GMWorldViewer::drawUI() {
     ImGui::Checkbox( "spot exteriors", &bExteriors );
     ImGui::SameLine();
     ImGui::Text( "(%zu banks loaded)", exteriors.size() );
-    if ( !gameWeathers.getPresets().empty() &&
-         ImGui::BeginCombo( "weather", pWeather != nullptr ? pWeather->Name.c_str() : "(none)" ) ) {
-        const std::vector<WeatherPreset> &presets = gameWeathers.getPresets();
-        for ( size_t i = 0; i < presets.size(); i++ ) {
-            if ( ImGui::Selectable( presets[i].Name.c_str(), &presets[i] == pWeather ) ) {
-                pWeather = &presets[i];
-                selectedWeather = static_cast<int32_t>( i );
-            }
-        }
-        ImGui::EndCombo();
-    }
+    weather.drawPanel( view );
     if ( !spots.empty() ) {
         ImGui::Separator();
         ImGui::Text( "spots.bin: %zu spots (n = sector banks present /9)", spots.size() );

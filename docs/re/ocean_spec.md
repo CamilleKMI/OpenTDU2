@@ -65,8 +65,9 @@ desc[] = 16-byte entries {u64 symbol id, u8 vsFlag}; n = 4, or 5 when kind == 2:
 
 The 2DM already declares REFLMAT/MATPARAM(VS)/AREASIZE/MATPARAM(PS) with flag 1 = VS, 0 = PS [DATA ibiza-o.2dm].
 AREASIZE (kind 2) = `(float)levelObj+0xf98, (float)levelObj+0xf9c` (uint → float), set once here. Those two ints are
-copied from the globals `DAT_01024a8c/DAT_01024a90` (FUN_0098e060) = island size in areas [INF: Ibiza = 7×6 areas,
-which is what the ibiza-o mesh spans, 0..43008 × 0..36864 m = 7×6×6144].
+copied from the globals `DAT_01024a8c/DAT_01024a90` (FUN_0098e060) = the WorldConfig object at 0x1024a50 (static
+default 11 × 9 [CODE 0xaee9d1]), i.e. worldconfig.cpr `NbColumns` / `NbRows` (Ibiza 7 × 6, Hawai and Casino 11 × 9
+[DATA]). The same pair gives the TD_HeightMap island AREASIZE = (16 / NbColumns, 16 / NbRows) (FUN_0098cc90).
 
 ### 1.2 Fixed material fields
 | offset | value | meaning |
@@ -392,6 +393,9 @@ helpers 0x424460/0x41f060 are encrypted].
   area tiles for areas loaded whose sectors are not, the sector tiles where sectors are loaded; the borders always.
   Coplanar duplicates would only differ by the colour map used, so overlapping is benign if you draw finer levels
   last with LEQUAL.
+- [CODE FUN_00992890 / FUN_00992820] the area -o scene is split per sector: dummy nodes `Sector-%d-%d-%d-%d` (and,
+  on odd rows, the previous area's `Sector-(x-1)-y-7-sy`) stored in a per sector table of the area; each holds that
+  sector's 768 m ocean tile and its far objects (see ocean_fix_spec §3).
 - First intro shot: sector tiles of 5-1-x-0/1 and 5-0-6/7-7 (see intro_spec §12.2).
 - [DATA] In `ibiza-o.3dd` the `AREA-x-y` nodes are dummies (no object); each has one child (`OCEAN`, `OCEAO`, …)
   carrying the 6144² tile, so hiding an island tile means hiding the items under `AREA-x-y`. A tile left under a finer
@@ -469,7 +473,7 @@ water height rule (0 / −1.8), Intro values (no modifier touches the ocean).
 
 **Inferred [INF]:** sampler-byte meanings (use repeat for NoiseNMap), RNG = NR LCG float, trig = sin, sky not drawn in
 the reflection, Proj of REFLMAT = main projection, NoizComp/NoizAss target assignment (strongly supported by quad
-half-texel offsets), island AreaSize = (7, 6), LOD swap policy.
+half-texel offsets), LOD swap policy (finest loaded level wins; the node tables are [CODE], their per frame use [ENC]).
 
 **Unknown [ENC]:** exact RNG output (bit-exact noise), the D3DCOLOR conversion of the clear colour, buckets of the
 dome/clouds, the per-frame show/hide of island `Area-x-y` / area / sector ocean nodes.

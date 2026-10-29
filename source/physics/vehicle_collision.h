@@ -54,7 +54,8 @@ public:
     void streamAround( const Vector3f &position, int32_t sectorRadius );
     void clear();
     // Extra collision (spot banks: <spot>_sc_*.shk in the spot frame).
-    void addCollision( const HavokCollision &collision, const Matrix4x4f &toWorld, bool bRoad );
+    // bSectorRoad: a sector -R.shk road surface (FREE_DRIVE road snapping).
+    void addCollision( const HavokCollision &collision, const Matrix4x4f &toWorld, bool bRoad, bool bSectorRoad = false );
     // Test mode (-vehtest): an infinite horizontal road plane y = height with
     // the given friction replaces the world (no obstacles).
     void setFlatGround( bool bEnable, float height = 0.0f, float friction = 0.7f ) {
@@ -72,9 +73,11 @@ public:
     bool sphereContact( const Vector3f &center, float radius, Contact &outContact,
                         const Vector3f *pPrevious = nullptr ) const;
 
-    // Road triangles (-R.shk) around a point (minimap).
+    // Road triangles (-R.shk, spot collision) around a point (minimap);
+    // bSectorRoadsOnly: only the sector -R.shk surfaces.
     void forEachRoadTriangle( const Vector3f &center, float radius,
-                              const std::function<void( const Vector3f &, const Vector3f &, const Vector3f & )> &callback ) const;
+                              const std::function<void( const Vector3f &, const Vector3f &, const Vector3f & )> &callback,
+                              bool bSectorRoadsOnly = false ) const;
 
     inline size_t getNumTriangles() const { return triangles.size(); }
     inline size_t getNumSectors() const { return loadedSectors.size(); }
@@ -85,6 +88,7 @@ private:
         Vector3f Normal;
         float Friction;
         bool bRoad;
+        bool bSectorRoad;
     };
     struct Box {
         Matrix4x4f Transform; // centre + orientation

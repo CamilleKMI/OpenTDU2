@@ -129,12 +129,16 @@ bool FirstOutro::load( EdenSceneView &view ) {
 }
 
 void FirstOutro::loadModels( EdenSceneView &view, const XmbDocument &entities ) {
+    pView = &view;
     // Same rules as the house models of IntroCinematic::loadBankModels
     // (spec_pool_interior 6): Scenery and Entity__Actor__Mesh in the bank
     // frame, Entity__Actor at entityTRS * rootLocal^-1; the interior LODs
     // (Entity__Actor__Interior) are kept: no interior is loaded here.
     // FREERIDE (mode 1) has no GSReflection (table 0x00f817e0): D_REFLECT is
-    // drawn without projectors.
+    // drawn without projectors. The bank materials are still registered
+    // (spot exterior setup FUN_00981b60 -> FUN_00d7e950 -> FUN_00d7df50,
+    // which runs before the mode check): the pool TD_Water gets U4 = 0 and
+    // no REFRACTION slot (ps 12/13), instead of sampling an empty s4.
     EdenRenderer *pRenderer = gpRender->getEdenRenderer();
     const Render2DM *pLibrary = &view.getWorld().getLibraryMaterials();
     auto loadModel = [&]( uint64_t rsc ) -> std::unique_ptr<EdenModel> {
@@ -149,8 +153,10 @@ void FirstOutro::loadModels( EdenSceneView &view, const XmbDocument &entities ) 
              !pModel->load( *pRenderer, *pScene, *pGeometry, pMaterials, pLibrary, bank.getPath().c_str() ) ) {
             return nullptr;
         }
+        view.registerProjectiveMaterials( *pModel );
         pModel->bindUVAnimations( bank );
         view.registerLightmapMaterials( *pModel, EdenSceneView::eLightmapScope::Exterior );
+        view.registerNeonMaterials( *pModel );
         return pModel;
     };
     auto firstMesh = []( XmbValue entry, const char *pField ) -> uint64_t {
@@ -213,6 +219,15 @@ void FirstOutro::loadModels( EdenSceneView &view, const XmbDocument &entities ) 
 void FirstOutro::unload() {
     sounds.stop( voices );
     sounds.unload();
+    if ( pView != nullptr ) {
+        for ( auto &pSet : sets ) {
+            pView->removePlanarReflectionModel( *pSet );
+        }
+        for ( Prop &prop : props ) {
+            pView->removePlanarReflectionModel( *prop.Model );
+        }
+        pView = nullptr;
+    }
     sets.clear();
     props.clear();
     scenes.clear();

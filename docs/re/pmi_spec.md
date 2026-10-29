@@ -21,9 +21,9 @@ Each sector bank holds up to five PMI files. The table lists the bank group/subt
 |---|---|---|---|
 | `Sector-…-V.pmi` | 5 / **10** | `FUN_00988d10` (kind 0) | vegetation: palms, agaves, olive trees… Static library models. [CODE]+[DATA] |
 | `Sector-…-O.pmi` | 5 / **13** | `FUN_00988d10` (kind 1, also the default) | objects: **white houses `HE_*`/`HT_*`**, walls `SF_WAL*`, lamps `SF_LIGH*`, bushes, rocks, benches… Static library models. [CODE]+[DATA] |
-| `Sector-…-S.pmi` | 5 / **50** | `FUN_00988d10` (kind 2) | skinned static models: guard rails `SF_GLISS`, each with its own bone palette. [CODE]+[DATA] |
+| `Sector-…-S.pmi` | 5 / **50** | `FUN_00988d10` (kind 2) | skinned static models: guard rails `SF_GLISS` (metal, 20 m, 7 bones) and `SF_GLISO` (wooden, 24 m, 8 bones), each record with its own skin matrices (§1.5). Drawn by OpenTDU2. [CODE]+[DATA] |
 | `Sector-…-A.pmi` | 5 / **14** | `FUN_009879e0` → `FUN_009613e0` | **actors**: road signs (`RS_Sp50_act` = the "50" sign, Stop, Yield, direction signs…) from `worldactors.bnk`. [CODE]+[DATA] |
-| `Sector-…-F.pmi` | 5 / **24** | `FUN_00c38f40` → `FUN_00c38d40` | at most 30 entries resolved through a hash list (`FUN_00b34a40`). The file is empty (464 bytes) in all 17 sectors checked. [CODE]+[DATA] |
+| `Sector-…-F.pmi` | 5 / **24** | `FUN_00c38f40` → `FUN_00c38d40` | **island ambient effects**: MOB hashcode = a Fx__SourceData of `fx/vfx_env.bnk`, type 5, at most 30 records per sector, started within the TriggerDistance of the camera (`particles_spec.md` 7). Empty (464 bytes) in most sectors; 105 sectors of the install place some (Ibiza 31, Hawai 491 records). [CODE]+[DATA] |
 
 In `FUN_00988d10` the subtype comes from the instance-list object (`obj+8`): 0 → 0x0a, 1 → 0x0d, 2 → 0x32, anything else → 0x0d. The resource getter is
 `FUN_00d8aea0(edx=group 5, ecx=subtype, bank, &size)` [CODE 0x988d4c..0x988d7e]. `FUN_00986760` builds three such lists at
@@ -98,7 +98,7 @@ The rotation helpers call encrypted code [ENC], so the sign convention was check
 
 - The D3DX convention with positive angles is used. RotX = [[1,0,0],[0,c,s],[0,-s,c]], RotY = [[c,0,-s],[0,1,0],[s,0,c]], RotZ = [[c,s,0],[-s,c,0],[0,0,1]].
 - Test: the stored AABB (w10..w15) was compared with the model's 3DG vertex AABB transformed by M, on 1,826 non-vegetation instances. With positive angles the median error is **0.08 m** (bbox quantization is 1/16 m) and 89% of instances are within 0.2 m. With negated angles the median error is 0.47 m. (`/tmp/claude-0/pmi/scr/val2.py`) [DATA]
-- Walls, houses and rocks all match. Vegetation is larger in the file because of the billboard leaves expanded by TD_Vegetation[SPR]. SF_GLISS differs because it is skinned. [DATA]/[INF]
+- Walls, houses and rocks all match. Vegetation is larger in the file because of the billboard leaves expanded by TD_Vegetation[SPR]. SF_GLISS differs because it is skinned (its box holds the skinned mesh, §1.5). [DATA]/[INF]
 - Order x→z→y comes from the code; the data cannot tell it apart from z→x→y because tilts are only a few degrees. [CODE]
 
 Note: the exe contains the exporter string "### PMI Model Error, matrix has been scaled, IT IS FORBIDEN ###" (0xf07078). It has no code reference. [DATA]
@@ -135,9 +135,41 @@ Both lists are capped at **4000 instances** per list per sector. Results ≥ 409
 
 ### 1.5 Payloads
 
-- **Type 3** (S.pmi `SF_GLISS`, extraSize 448): 7 × float4x4 (D3D row-major) bone matrices.
-  - In `0x988d10` type 3 stores the payload pointer at `modelInstance+0x78`, sets flag `0x200`, and patches every sub-mesh (`+0x2c`). [CODE]
-  - Reading these as the skinning palette applied before M (`v·Bone_i·M`) is [INF]: the bones carry a ±90° X rotation that cancels the instance's ~91° X rotation.
+- **Type 3** (S.pmi guard rails): one D3D row-major float4x4 **skin matrix per skeleton bone**: `SF_GLISS` extraSize 448 = 7 matrices,
+  `SF_GLISO` extraSize 512 = 8 matrices. Ibiza 2,936 rail records (2,381 GLISS, 555 GLISO), Hawai 18,780, Casino 13. [DATA]
+  - Loader, kind 2 (S list) of `0x988d10` [CODE]: stores the payload pointer at `modelInstance+0x78`, sets flag `0x200`, calls
+    `FUN_004dc650` [ENC], then writes `25.0` (`DAT_00edd53c`) to `modelInstance+0x70` and to `+0x2c` of the object of every LOD
+    entry (`+0x58..+0x5c`, stride 0xc). `+0x70` is the bounding radius slot `in_EAX[0x1c]` of `FUN_00da0440` (default 1.0),
+    so the rail gets a fixed 25 m radius for its deformed mesh [CODE; "radius" is INF from `0xda0440`].
+  - Kind 2 also calls `FUN_009884c0`: it maps the model hash through a 3-entry table `{u64 from, u64 to}` at `0x11f7728`
+    (`FUN_00c31620`), instantiates the `to` model (`FUN_008b9100`), stores it at `+0x60` with flag `0x10000`, and the loader gives it
+    the same flag `0x200` and payload. The table is zeroed at init (`0xc33f78`) and filled by `FUN_00c316f0`, which has no readable
+    caller, so which model this companion is stays unknown [CODE / ENC]. OpenTDU2 does not draw it.
+  - The palette upload to the shader was not found in readable code (the reader of `+0x78` is after `FUN_004dc650` [ENC]).
+  - Kind 2 does not clear `bVar3`, so every rail is registered in the cell lists (kind 0 only registers models with ≥ 2 LODs).
+    The per frame S pass is `FUN_00981f40` [CODE]: gated by byte `[[sector+0x1bdc]+0xeb1]`, it walks the visible cells
+    (`{u16 cell, f32 cellD2}` at `sector+0x1be0..[+0x28a8]`) and their S entries (`sector+0x11aa0 + cell·0x40`, `{f32 maxDist2, inst*, ?}`,
+    count at `sector+0x1176c + cell·2`) and adds instances while `cellD2 <= maxDist2 · (DAT_00fd50a8 + DAT_00f7f5f8)` (= max(f, 1)),
+    the same rule as the V/O pass `FUN_00985290` (pmi_streaming_spec.md §4). `maxDist2` is written by `FUN_004dd1c0` [ENC], so the
+    rail draw distance is unknown. The library node has one LOD with switch value 0. OpenTDU2 draws the rails of every loaded
+    sector (no distance limit) [INF].
+- Geometry [DATA, `library.3dg`]: one PRIM per rail, TD_Ground material `SF_gliss_Sk` / `SF_Gliso_Sk` (2DM spec 9 =
+  S_USESKINNING = 1), BONE palette = identity (0..6 / 0..7), stream 0 = position, UBYTE4 blend indices, one FLOAT1 weight
+  (the 4th weight is implicit). The rail runs along model −Z from 0 to −20 m (GLISS) / −24 m (GLISO); bone 0 holds the start
+  section (z 0..−1.2), bone 1 the end cap (z = −20 / −24), bones 2..6(7) the posts and the beam every 4 m, blended pairwise.
+- Skinned TD_Ground vertex shader (`TD_Ground_vs_1`, skin=1) [SHADER]: `a0 = 3·blendIndices`,
+  `p' = Σ_k w_k (p·c[148+a0.k], p·c[149+a0.k], p·c[150+a0.k])` with `w = (v.x, v.y, v.z, 1−x−y−z)`, then
+  `oPos = p'·__World_View_Proj (c60..c63)`. So the skin matrix is applied before the instance matrix:
+  **`v_world = v · Bone[blendIndex] · M`** (D3D row vectors, M = the record matrix of §1.3).
+- Validation [DATA, `/tmp/claude-0/-home-claude/44d890d5-0ce4-567e-a88c-c2f12ec3a4a4/scratchpad/scr/seam.py`]: with
+  `v · Bone · M` the end cap of each rail lands on the start section of the next one. Median gap 8 mm (3-3-3-5: 123/131 rails
+  < 5 cm, 3-3-1-0: 137/141), 17 mm on the wooden hairpins of 0-3-4-7 (24/32, bones up to 85° from bone 0). The others are chain
+  ends. With the bone rotation transposed the median gap is 7 cm to 16 m; without bones it is 20 m. The record AABB holds the
+  skinned mesh (it is larger by ~2.6 m on x and ~6.5 m on z, an exporter margin [DATA]).
+- The bones carry a −90° X rotation that cancels the instance's ~90° X rotation (the rail model is exported lying along −Z).
+- Collision: rails have no `Library.dhk` model (no SF_GLIS* entry). Their collision is in the sector static `.shk`: `hkpCapsuleShape`
+  bodies, radius 0.25, one capsule per one or two rails (half length 9 to 21 m). In 3-3-3-5, 68 of the 76 capsules lie within
+  0.22 m (median) of the drawn rail vertices [DATA, `capchk.py`]. OpenTDU2's VehicleWorldCollision already loads them.
 - **Type 4** (A.pmi direction and distance signs, extraSize 19/55/64): sign text. [DATA, decoded]
   - byte 0 = layout code (0x03, 0x1f, 0x22, 0x23…).
   - The rest is text: 0 = separator, 0x01..0x1a = 'A'..'Z', 0x1b..0x24 = '0'..'9', 0x2b..0x44 = 'a'..'z', 0x47 = 'ñ', 0x50 = 'À'. Codes 0x27, 0x29, 0x48 are unknown.
@@ -173,7 +205,7 @@ Both lists are capped at **4000 instances** per list per sector. Results ≥ 409
 
 - `FUN_00da0440` copies each LOD `{object, dist × 3.160494 (0xf4aa28 = (16/9)²)}` into the instance.
   - `lodDistance` looks like a **squared distance**. Example √values: walls 37/73 m, houses `HE_AA_A` 109/271 m, palms 90/144 m. [INF from the values]
-  - The exact comparison (and the global `SET_GLOBAL_LOD_FACTOR`, `MAP_LOD_SELECTION_SCALE`, `MAP_LOD_ALWAYS_VISIBLE_RADIUS`) is not decoded [ENC/unknown].
+  - The comparison and the LOD factor are decoded in `pmi_streaming_spec.md` §3; LOD meshes and impostors in `lod_impostor_spec.md`.
   - Beyond the last LOD the instance is not drawn [INF].
   - The `3dd.h` comment "+0x50 pObjectHashEntry" in OpenTDU2 is LOD 0.
 - **LOD objects and materials** [DATA]:
@@ -269,6 +301,7 @@ Notes:
 |---|---|
 | `0x00986760` | sector instance setup: calls `0x988d10` ×3 (V/O/S lists at +0x28d0/+0xa010/+0x11750), then `0x988730` (+0x18e90) |
 | `0x00988d10` | **static PMI loader** (V/O/S): version check, two cell histograms (409), per record decode → `0x98ac80` (model lookup and instance) → cell registration via `0x987dd0`; type 3/4 payload handling; limit 4000 |
+| `0x009884c0` | S list companion model: hash remap (`0xc31620`, table `0x11f7728`) → `0x8b9100`, stored at instance `+0x60`, flag `0x10000` |
 | `0x00988250` | record → matrix (S·Rx·Rz·Ry + T), bbox (vec4 min/max, w=0), color = 0xffffffff |
 | `0x0098ac80` | model instance creation: `FUN_008b9100(hash)`, copies the bbox, scans materials for Lamp/Sprite/LightBeam/Gouraud |
 | `0x0098a870` | static instance matrix rebuild: Scale · RotY(yaw) with a lookup `0x97ef20` |
@@ -285,7 +318,7 @@ Notes:
 | `0x0048fd00`, `0x004dd*`, `0x004dc*` | actor entity lookup and cell-list consumers: [ENC] |
 
 Constants: 0xf4ae38 = 0.0156252384, 0xf49e08 = 128.0, 0xf4ae30 = 6.1036088e-5, 0xf4ae40 = 9.5875264e-5, 0xf4ae28 = 0.0625009537,
-0xf4add0 = 1024.0, 0xf49830 = 65535.0, 0xf4aa28 = 3.160494, 0xedf668 = 1.0f, 0xf76630 = 614400.
+0xf4add0 = 1024.0, 0xf49830 = 65535.0, 0xf4aa28 = 3.160494, 0xedf668 = 1.0f, 0xf76630 = 614400, 0xedd53c = 25.0 (rail bounding radius).
 
 ---------------------------------------------------------------------------------------------------------------------
 
@@ -296,5 +329,5 @@ For each loaded sector, for each of the V/O/S/A files:
 1. Parse the file (§1).
 2. For V/O/S records: find the library node by hash. For LOD0, draw its object with the node's MBNK materials (`library.2dm`) and the matrix of §1.3, ignoring the node transform.
    - Optional LOD: switch to LOD1 (the TD_HardwareInstance or TD_Impostor material) beyond √lodDistance[0], and hide beyond √lodDistance[1] (both scaled by an unknown factor) [INF].
-   - S records (type 3) need the per-instance bone palette from the payload.
+   - S records (type 3): skin with the record payload, `v · Bone[i] · M` (§1.5); draw distance [ENC] (§1.5), OpenTDU2 draws them over the loaded sectors.
 3. For A records: entity by `__Hc` → `__Name` → 3DD/3DG/2DM of `worldactors.bnk` (via `hashcodes.xmb` rsc, or root node = `GetIdentifier64bit(__Name)`). Draw the actor's node hierarchy under the PMI matrix. Type 4 carries sign text, which can be ignored for geometry.

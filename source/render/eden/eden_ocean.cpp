@@ -197,9 +197,9 @@ void EdenOcean::renderReflection( EdenRenderer &renderer, const EdenSceneParams 
     if ( !bReady ) {
         return;
     }
-    // FUN_00961ca0: mirror camera about the water plane y = h (0 on Ibiza):
-    // position (x, 2h - y, z), forward mirrored, up kept.
-    const float h = 0.0f;
+    // FUN_00961ca0: mirror camera about the water plane y = h (0, -1.8 on
+    // Hawai): position (x, 2h - y, z), forward mirrored, up kept.
+    const float h = waterHeight;
     const Matrix4x4f cameraWorld = scene.View.inverse();
     const Vector3f position = cameraWorld.getTranslation();
     const Vector3f forward( -cameraWorld.m[2][0], -cameraWorld.m[2][1], -cameraWorld.m[2][2] );
@@ -329,7 +329,7 @@ void EdenOcean::setupMaterial( EdenRenderer &renderer, EdenMaterial &material, e
     material.StageConstants[0]["reflMat__float4x4"] = { Row( reflectionMatrix, 0 ), Row( reflectionMatrix, 1 ),
                                               Row( reflectionMatrix, 2 ), Row( reflectionMatrix, 3 ) };
     material.StageConstants[0]["ShiftWorld"] = { Vector4f( 0.0f, 0.0f, 0.0f, 0.0f ) };
-    material.StageConstants[0]["AreaSize"] = { Vector4f( 7.0f, 6.0f, 0.0f, 0.0f ) };
+    // AreaSize (island kind): the area grid, set by EdenWorld.
     material.StageConstants[1]["matParam__array4"] = {
         Vector4f( specularPower / Max( sunIntensity * sunIntensity, 1e-6f ), 2.0f * lowRes.y, 2.0f * highRes.y, 0.0f ),
         Vector4f( fresnel.x * fresnel.z, ( 1.0f - fresnel.x ) * fresnel.z, fresnel.y, 0.0f ),

@@ -56,6 +56,18 @@ public:
         std::string ExteriorPrefix = "eph_l3di";
         bool bWorld = true;
         uint32_t GameModeId = 0x20; // AVATAR_CHOICE (0x23 FIRST_WM)
+        // The scene bank has no collision: the spot exterior collision
+        // (<spot>_sc_*.shk, same frame) is the floor of the scene car
+        // (CINE, meeting_tess at e_hotela) [INF].
+        bool bExteriorCollision = false;
+        // Interior bank of the spot (CINE kind 3: "%sInterior/ich_ib.bnk",
+        // FUN_00b9ff50 in FUN_009b6df0) drawn in the spot frame with its
+        // interior meshes [CODE + INF frame].
+        std::string InteriorBank;
+        // Frontend movie of the walk mode / labels: "intro" (INTRO.vmf) or
+        // the shop movie of the SHOP mode ("shopscar", SHOPSCAR.vmf: the used
+        // car dealer cursor, mini menu, car data and price panels).
+        std::string UiMovie = "intro";
     };
 
     bool load();
@@ -65,7 +77,8 @@ public:
 
     // FUN_00da7fd0: plays a cinematic as the main one (bStopPrevious: the
     // current main one is stopped, no event 7).
-    bool playMain( const std::string &name, bool bStopPrevious = true );
+    // startTime >= 0: start (seek) time (-cinetime tests).
+    bool playMain( const std::string &name, bool bStopPrevious = true, float startTime = -1.0f );
     // Background cinematic (no camera: FUN_00da8040 / FUN_00da8d90, the
     // FIRST_WM ambient and voice cinematics); several can run.
     bool playBackground( const std::string &name, bool bLoop = true );
@@ -86,6 +99,12 @@ public:
     inline FlashPlayer &getUi() { return ui; }
     // FSCommands of the INTRO movie (sbdd is handled here).
     void setCommandCallback( FlashPlayer::FSCommandCallback callback ) { commandCallback = std::move( callback ); }
+    // FSCommands of GENERAL.vmf other than sbdd (dialog box "dbxc", "wmof"...).
+    // GENERAL /dialog_box drawn (between the "dbxo" and "dbxc" FSCommands).
+    void setDialogBoxVisible( bool bVisible ) { bDialogBoxVisible = bVisible; }
+    void setGeneralCommandCallback( FlashPlayer::FSCommandCallback callback ) {
+        generalCommandCallback = std::move( callback );
+    }
     CinematicSounds &getSounds() { return sounds; }
 
     // Player avatar (the .sce actor "Avatar" of C_FIESTA_INTRO_xx): DBPNJ
@@ -104,7 +123,31 @@ public:
     // Car of the scene (FIRST_WM: the current car, 387 California): rests at
     // an Entity__PosCam (D_CAR), driven by the .sce actor of an
     // Entity__CinCar (CIN_CAR) while a cinematic animates it.
-    bool loadCar( const CinematicCar::Desc &desc, const std::string &restEntity, const std::string &cinCarEntity );
+    // carActor: .sce actor name animating the car when it is not an
+    // Entity__CinCar (meeting_tess: "PLAYER_CAR", the player car, the
+    // object of the scene without entity).
+    bool loadCar( const CinematicCar::Desc &desc, const std::string &restEntity, const std::string &cinCarEntity,
+                  const std::string &carActor = std::string() );
+    // Showroom cars (SHOP mode: the shop scene slots, FUN_00a4fea0 /
+    // FUN_00a4fd50): a car resting at an Entity__PosCam of the scene bank
+    // (Entity__ShopData PosCams[slot]), on the scene collision floor.
+    int32_t addShowCar( const CinematicCar::Desc &desc, const std::string &restEntity );
+    inline size_t getShowCarCount() const { return showCars.size(); }
+    CinematicCar &getShowCar( size_t index ) { return *showCars[index].Car; }
+    bool getShowCarWorld( size_t index, Matrix4x4f &outWorld ) const;
+    void setShowCarVisible( size_t index, bool bVisible );
+    // Extra walk-mode selectable (scene-local volume), e.g. the box of a
+    // showroom car (SelItemType "vehicle"). Returns its selectable index.
+    int32_t addSelectable( const Volume &volume );
+    // The scene bank (Setup::Bank) and its hashcodes, e.g. for entities the
+    // game mode reads itself (Entity__ShopData of a shop interior).
+    inline const Bank &getSceneBank() const { return introBank; }
+    inline const BankHashcodes &getSceneHashcodes() const { return introHashcodes; }
+    // CinProps of a cinematic of the scene bank (0 if absent) and the bit 2
+    // "skippable" set by the game (cinematic +0x610 |= 4).
+    uint32_t getCinProps( const std::string &name ) const;
+    // Scene frame (cinematic scene space -> island).
+    inline const Matrix4x4f &getSceneOrigin() const { return sceneOrigin; }
     // GENERAL pop_goal (FUN_00d61790 / FUN_00d61700).
     void showGoal( const std::string &text );
     void closeGoal();
@@ -117,12 +160,42 @@ public:
     inline CinematicCar &getCar() { return car; }
     inline const CinematicCar &getCar() const { return car; }
     bool getCarWorld( Matrix4x4f &outWorld ) const;
+    // CINE scenes played relative to the player car (FUN_009b5210, no spot
+    // slot: the cinematic transform cine+0x120 is built from the driver
+    // matrix through encrypted helpers): the cinematic frame is the spot
+    // frame lifted so that the rest entity (D_CAR) stands on the spot
+    // exterior floor; the exterior sets and collision stay at the spot
+    // [INF]. Returns the lift (m), 0 when no floor is found.
+    float liftOntoFloor( const std::string &restEntity );
+    // Alternative [INF]: the cinematic frame moved so that the rest entity
+    // lands at a world pose (position, heading in the spots.bin convention:
+    // world = T + R_y(heading) local); the exterior stays at the spot.
+    void placeEntityAt( const std::string &restEntity, const Vector3f &worldPosition, float worldHeading );
+    // spots.bin record of a spot (spot object ctor FUN_00b2eb80): +0x10
+    // position, +0x1c / +0x20 / +0x24 Euler angles (rt +0x44..), +0x28 second
+    // position (rt +0x50), +0x38 second heading (rt +0x60) [CODE + DATA].
+    struct SpotRecord {
+        Vector3f Position;
+        float Heading = 0.0f;
+        Vector3f Position2;
+        float Heading2 = 0.0f;
+        uint8_t Type = 0;    // rt+0x79 <- rec+0x100 (shop type: 1 / 2 car dealer, 4 after market, 8 car wash /
+                             // rental, 0x11 used car dealer "scr_open"; FUN_009f3050 / FUN_009f23e0)
+    };
+    static bool ReadSpot( const char *pName, SpotRecord &out );
+    // Island terrain height (heightfield of the loaded sectors / areas).
+    bool getGroundHeight( float x, float z, float &outHeight ) const;
     bool getCarLocal( Matrix4x4f &outLocal ) const;
     // Player avatar seated at the car driver seat (DVRSEAT_LR) with the
     // avatarsdriver.bnk drive pose (anims\car\stance_turn.xan) and the
     // driveiklayer6 IK (hands / feet / back on the car nodes); replaces the
     // .sce "Avatar" actor while set (C_OUTRO message avm4:CIN_CAR) [INF].
     bool setPlayerSeated( bool bSeated );
+    // SHOP "Enter" (FUN_00a519b0): the player avatar on the driver seat of a
+    // showroom car (index of addShowCar) instead of the scene car; -1 = the
+    // scene car (default).
+    void setSeatedShowCar( int32_t showCarIndex );
+    inline int32_t getSeatedShowCar() const { return seatedShowCar; }
     // Overrides the camera (walk mode); nullptr: cinematic camera.
     void setCameraOverride( const EdenSceneView::Camera *pCamera );
     inline const EdenSceneView::Camera &getCamera() const { return camera; }
@@ -138,10 +211,24 @@ public:
     bool playEmitter( const char *pName );
     // Stops the 4 S_WALKMODE_Music emitters (C_INTRO start, event 0).
     void stopMusic();
+    // GENERAL.vmf (pop_goal, black_stripes; /:PlayerName of the CINE mode
+    // listener event 0).
+    inline FlashPlayer &getGeneral() { return general; }
+
+    // .sce actor messages (object "Message" tracks, e.g. the car door
+    // messages opdl:0.64 of meeting_tess PLAYER_CAR) of the main cinematic
+    // crossed since the last call, in time order.
+    struct ActorMessage {
+        std::string Actor;
+        std::string Message;
+    };
+    std::vector<ActorMessage> takeActorMessages();
 
     void tick( float deltaTime );
     void renderOffscreen();
     void draw();
+    // The frontend movies only (tests without the 3D view, -no3d).
+    void drawUi();
 
 private:
     struct Definition {
@@ -168,6 +255,10 @@ private:
         Matrix4x4f Local;                // orient_pos_scale (house frame)
         Matrix4x4f RootInverse;          // inverse of the 3DD root node local
         std::unique_ptr<EdenModel> Model;
+        // Entity__Actor skeleton[0] (.XSB, subtype 7): skinned prop posed by
+        // the Animation track of its .sce actor (meeting_tess CF_KCar key
+        // ring, CF_Phone).
+        std::unique_ptr<EdenSkeleton> Skeleton;
     };
     // Avatars: Entity__PNJ (DBPNJ), animated by the .sce actor Animation
     // tracks (.anm of the cinematic bank); the player avatar ("Avatar").
@@ -215,10 +306,18 @@ private:
     EdenSceneView view;
     FlashPlayer ui;
     FlashPlayer::FSCommandCallback commandCallback;
+    FlashPlayer::FSCommandCallback generalCommandCallback;
+    bool bDialogBoxVisible = false;
     FlashPlayer general;            // GENERAL.vmf (black_stripes letterbox)
     Matrix4x4f sceneOrigin;         // cinematic scene space -> island
+    Matrix4x4f exteriorOrigin;      // spot frame (exterior sets / collision), = sceneOrigin unless lifted
+    float collisionLift = 0.0f;     // cinematic-local y + lift = collision (spot) local y
+    bool bSceneMoved = false;       // sceneOrigin != exteriorOrigin
+    size_t introSetCount = 0;       // sets[0..n) from the scene bank, then the exterior ones
+    size_t introPropCount = 0;      // same for props
     Quaternionf sceneRotation;      // rotation of sceneOrigin (Eden convention)
     Bank exteriorBank;              // islands/ibiza/exterior/eph_l3di.bnk
+    Bank interiorBank;              // Setup::InteriorBank
     std::vector<std::unique_ptr<EdenModel>> sets; // house (D_SCENE) and exterior
     std::vector<EdenModel *> reflectSets; // Entity__Actor__Mesh D_REFLECT
     std::vector<Prop> props;
@@ -231,9 +330,20 @@ private:
     HavokCollision collision;
     std::unordered_map<std::string, std::pair<Vector3f, Quaternionf>> entityPlacements; // PosCam, CinCar
     CinematicCar car;
+    struct ShowCar {
+        std::unique_ptr<CinematicCar> Car;
+        std::string RestEntity;
+        bool bVisible = true;
+        bool bEnvironment = false;
+    };
+    std::vector<ShowCar> showCars;
+    int32_t seatedShowCar = -1; // setSeatedShowCar
     std::string carRestEntity;
     uint64_t carEntityHashcode = 0;
     std::unordered_map<std::string, uint64_t> cinCarHashcodes;
+    std::string carActorName;
+    std::vector<ActorMessage> actorMessages;
+    void collectActorMessages( const Playing &playing, float from, float to );
     bool bCarEnvironment = false;
     // Static car cube of the scene bank (CUBECAR, garage.bnk): FUN_009aa2c0
     // -> FUN_00a4baf0; the dynamic cube is then not used.
@@ -294,6 +404,11 @@ private:
                                              const CinematicScene *&outScene, float &outSceneTime ) const;
     void animatePnj( Pnj &pnj, const Playing &playing, const CinematicScene &scene,
                      const CinematicScene::Object &object, float sceneTime );
+    // Animation track of a .sce actor on a skeleton (avatar_spec 4.1); the
+    // style anims of bWoman replace the clip references.
+    void sampleActorAnimation( const Playing &playing, const CinematicScene &scene, const CinematicScene::Object &object,
+                               float sceneTime, const EdenSkeleton &skeleton, bool bWoman,
+                               std::vector<BoneTransform> &locals );
     void updatePnjs();
     // .sce actor track "Morph": FaceFX animation of the facial bones.
     void applyFaceFx( Pnj &pnj, const CinematicScene &scene, const CinematicScene::Object &object, float sceneTime,
@@ -306,6 +421,7 @@ private:
     void loadLights( const XmbDocument &entities );
     void computeAvatarLighting( const Vector3f &rootPosition, EdenAvatarLighting &outLighting ) const;
     bool computeCarWorld( Matrix4x4f &outWorld ) const;
+    Matrix4x4f fitOnSceneFloor( const CinematicCar &car, const Vector3f &position, const Quaternionf &rotation ) const;
     std::vector<const Playing *> playingOrder() const;
     void drawFade();
 };

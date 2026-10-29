@@ -1,6 +1,9 @@
 #include "shared.h"
 #include "flash_player.h"
 
+#include <algorithm>
+#include <functional>
+
 namespace {
 FlashPlayer::CommandResolver gCommandResolver;
 // DAT_013e2720: name -> {scale x, scale y, bitmap} (FUN_00dd85c0 lookup).
@@ -322,12 +325,42 @@ void FlashPlayer::tick( float deltaTime ) {
         accumulator -= frameTime;
         advanceClip( root );
         runPendingActions();
+        dispatchEnterFrame();
+        runPendingActions();
         numFrames++;
     }
     if ( accumulator > frameTime ) {
         accumulator = 0.0f;
     }
     graveyard.clear();
+}
+
+void FlashPlayer::dispatchEnterFrame() {
+    std::vector<Clip *> clips;
+    std::function<void( Clip & )> collect = [&]( Clip &clip ) {
+        clips.push_back( &clip );
+        for ( auto &entry : clip.DisplayList ) {
+            if ( entry.second->pClip != nullptr ) {
+                collect( *entry.second->pClip );
+            }
+        }
+    };
+    collect( root );
+    for ( Clip *pClip : clips ) {
+        auto it = pClip->Variables.find( "onEnterFrame" );
+        if ( it == pClip->Variables.end() || it->second.Type != Value::eType::Function ) {
+            continue;
+        }
+        const int32_t index = it->second.FunctionIndex;
+        Clip *pScope = index >= 0 && index < static_cast<int32_t>( functions.size() ) ? functions[index].pScope : nullptr;
+        if ( pScope == nullptr || std::find( clips.begin(), clips.end(), pScope ) == clips.end() ) {
+            pScope = pClip;
+        }
+        Value self;
+        self.Type = Value::eType::Clip;
+        self.pClip = pClip;
+        callFunction( index, pScope, {}, &self );
+    }
 }
 
 void FlashPlayer::advanceClip( Clip &clip ) {
@@ -574,22 +607,35 @@ FlashPlayer::Clip *FlashPlayer::resolveTarget( Clip *pClip, const std::string &t
     if ( target.empty() ) {
         return pClip;
     }
+    // Slash syntax ("/a/b", "../../") or dot syntax ("_root.a.b",
+    // "_parent._parent"): ".." elements must survive the dot split.
+    std::vector<std::string> elements;
     Clip *pCurrent = pClip;
     size_t start = 0;
-    std::string path = target;
-    for ( char &c : path ) {
-        if ( c == '.' ) {
-            c = '/';
-        }
-    }
-    if ( path[0] == '/' ) {
+    if ( target[0] == '/' ) {
         pCurrent = &root;
         start = 1;
     }
-    while ( start <= path.size() && pCurrent != nullptr ) {
-        size_t end = path.find( '/', start );
-        std::string element = path.substr( start, end == std::string::npos ? std::string::npos : end - start );
-        start = end == std::string::npos ? path.size() + 1 : end + 1;
+    while ( start <= target.size() ) {
+        size_t end = target.find( '/', start );
+        std::string slashElement = target.substr( start, end == std::string::npos ? std::string::npos : end - start );
+        start = end == std::string::npos ? target.size() + 1 : end + 1;
+        if ( slashElement == ".." ) {
+            elements.push_back( slashElement );
+            continue;
+        }
+        size_t dotStart = 0;
+        while ( dotStart <= slashElement.size() ) {
+            size_t dot = slashElement.find( '.', dotStart );
+            elements.push_back(
+                slashElement.substr( dotStart, dot == std::string::npos ? std::string::npos : dot - dotStart ) );
+            dotStart = dot == std::string::npos ? slashElement.size() + 1 : dot + 1;
+        }
+    }
+    for ( const std::string &element : elements ) {
+        if ( pCurrent == nullptr ) {
+            break;
+        }
         if ( element.empty() || element == "this" ) {
             continue;
         }
@@ -649,6 +695,14 @@ void FlashPlayer::setVariableBool( const std::string &path, bool bValue ) {
 
 void FlashPlayer::setVariableNumber( const std::string &path, double value ) {
     assignVariable( &root, path, Value::MakeNumber( value ), nullptr );
+}
+
+void FlashPlayer::setVariableValue( const std::string &path, const Value &value ) {
+    assignVariable( &root, path, value, nullptr );
+}
+
+FlashPlayer::Value FlashPlayer::getVariableValue( const std::string &path ) {
+    return lookupVariable( &root, path, nullptr );
 }
 
 std::string FlashPlayer::getVariable( const std::string &path ) {
@@ -872,6 +926,14 @@ void FlashPlayer::setMember( Value &object, const std::string &name, const Value
         }
     } else if ( object.Type == Value::eType::Object && object.pObject != nullptr ) {
         object.pObject->Members[name] = value;
+        if ( object.pObject->bArray && !name.empty() &&
+             name.find_first_not_of( "0123456789" ) == std::string::npos ) {
+            const double index = std::stod( name );
+            const double length = object.pObject->Members["length"].toNumber();
+            if ( index + 1.0 > length ) {
+                object.pObject->Members["length"] = Value::MakeNumber( index + 1.0 );
+            }
+        }
     }
 }
 
@@ -895,6 +957,37 @@ bool FlashPlayer::invoke( const std::string &clipPath, const std::string &functi
     callFunction( member.FunctionIndex, pClip, values, &object );
     runPendingActions();
     return true;
+}
+
+bool FlashPlayer::invokeOnClipVariable( const std::string &variablePath, const std::string &function,
+                                        const std::vector<std::string> &args ) {
+    Value object = lookupVariable( &root, variablePath, nullptr );
+    if ( object.Type != Value::eType::Clip || object.pClip == nullptr ) {
+        return false;
+    }
+    Value member = getMember( object, function );
+    if ( member.Type != Value::eType::Function ) {
+        return false;
+    }
+    std::vector<Value> values;
+    for ( const std::string &arg : args ) {
+        values.push_back( Value::MakeString( arg ) );
+    }
+    callFunction( member.FunctionIndex, object.pClip, values, &object );
+    runPendingActions();
+    return true;
+}
+
+std::string FlashPlayer::getClipVariablePath( const std::string &variablePath ) {
+    Value object = lookupVariable( &root, variablePath, nullptr );
+    if ( object.Type != Value::eType::Clip || object.pClip == nullptr ) {
+        return std::string();
+    }
+    std::string path;
+    for ( Clip *pClip = object.pClip; pClip != nullptr && pClip->pInstance != nullptr; pClip = pClip->pParent ) {
+        path = "/" + pClip->pInstance->Name + path;
+    }
+    return path.empty() ? std::string( "/" ) : path;
 }
 
 bool FlashPlayer::setClipVisible( const std::string &clipPath, bool bVisible ) {
@@ -945,6 +1038,39 @@ FlashPlayer::Value FlashPlayer::callMethod( Value &object, const std::string &na
         Value member = getMember( object, name );
         if ( member.Type == Value::eType::Function ) {
             return callFunction( member.FunctionIndex, pClip, args, &object );
+        }
+        if ( object.pObject != nullptr && object.pObject->bArray ) {
+            Object &array = *object.pObject;
+            const std::string method = ToLower( name );
+            int32_t length = static_cast<int32_t>( array.Members["length"].toNumber() );
+            if ( method == "push" ) {
+                for ( const Value &arg : args ) {
+                    array.Members[std::to_string( length++ )] = arg;
+                }
+                array.Members["length"] = Value::MakeNumber( length );
+                return Value::MakeNumber( length );
+            }
+            if ( method == "pop" && length > 0 ) {
+                const std::string key = std::to_string( length - 1 );
+                Value last = array.Members[key];
+                array.Members.erase( key );
+                array.Members["length"] = Value::MakeNumber( length - 1 );
+                return last;
+            }
+            if ( method == "join" ) {
+                const std::string separator = args.empty() ? std::string( "," ) : args[0].toString();
+                std::string joined;
+                for ( int32_t i = 0; i < length; i++ ) {
+                    if ( i > 0 ) {
+                        joined += separator;
+                    }
+                    auto it = array.Members.find( std::to_string( i ) );
+                    if ( it != array.Members.end() && it->second.Type != Value::eType::Undefined ) {
+                        joined += it->second.toString();
+                    }
+                }
+                return Value::MakeString( joined );
+            }
         }
     }
     if ( object.Type == Value::eType::String ) {
@@ -1521,14 +1647,31 @@ FlashPlayer::Value FlashPlayer::execute( Clip *pClip, uint32_t offset, uint32_t 
             break;
         }
         case A_NewObject: {
-            pop(); // constructor name
+            const std::string constructor = pop().toString();
             const int32_t numArgs = static_cast<int32_t>( pop().toNumber() );
+            std::vector<Value> args;
             for ( int32_t i = 0; i < numArgs; i++ ) {
-                pop();
+                args.push_back( pop() );
             }
             Value object;
             object.Type = Value::eType::Object;
             object.pObject = std::make_shared<Object>();
+            if ( ToLower( constructor ) == "array" ) {
+                // new Array() / new Array(length) / new Array(e0, e1, ...)
+                // (SHOPSCAR SetMiniMenu: setBt.push(new Array(text, action,
+                // msg, lock))).
+                object.pObject->bArray = true;
+                double length = 0.0;
+                if ( args.size() == 1 && args[0].Type == Value::eType::Number ) {
+                    length = args[0].Number;
+                } else {
+                    for ( size_t i = 0; i < args.size(); i++ ) {
+                        object.pObject->Members[std::to_string( i )] = args[i];
+                    }
+                    length = static_cast<double>( args.size() );
+                }
+                object.pObject->Members["length"] = Value::MakeNumber( length );
+            }
             push( object );
             break;
         }
@@ -1550,6 +1693,7 @@ FlashPlayer::Value FlashPlayer::execute( Clip *pClip, uint32_t offset, uint32_t 
             Value object;
             object.Type = Value::eType::Object;
             object.pObject = std::make_shared<Object>();
+            object.pObject->bArray = true;
             for ( int32_t i = 0; i < count; i++ ) {
                 object.pObject->Members[std::to_string( i )] = pop();
             }
@@ -1600,6 +1744,7 @@ FlashPlayer::Value FlashPlayer::execute( Clip *pClip, uint32_t offset, uint32_t 
             // The body uses the constant pool of the action block that
             // defines it.
             function.Constants = constants;
+            function.pScope = pClip;
             functions.push_back( function );
             Value v;
             v.Type = Value::eType::Function;
@@ -1860,7 +2005,7 @@ void FlashPlayer::drawClip( Renderer2D &renderer, const Clip &clip, const FlashM
         const ActiveMask &mask = masks.back();
         renderer.setStencil( eStencilMode::SM_Decrement, 0 );
         maskDrawing++;
-        drawInstance( renderer, *mask.pInstance, mask.Matrix, FlashColorTransform(), stageToCanvas );
+        drawInstance( renderer, *mask.pInstance, clip, mask.Matrix, FlashColorTransform(), stageToCanvas );
         maskDrawing--;
         maskLevel--;
         masks.pop_back();
@@ -1878,14 +2023,14 @@ void FlashPlayer::drawClip( Renderer2D &renderer, const Clip &clip, const FlashM
             const FlashMatrix maskMatrix = matrix * instance.Matrix;
             renderer.setStencil( eStencilMode::SM_Increment, 0 );
             maskDrawing++;
-            drawInstance( renderer, instance, maskMatrix, FlashColorTransform(), stageToCanvas );
+            drawInstance( renderer, instance, clip, maskMatrix, FlashColorTransform(), stageToCanvas );
             maskDrawing--;
             maskLevel++;
             masks.push_back( { &instance, maskMatrix } );
             renderer.setStencil( eStencilMode::SM_TestEqual, maskLevel );
             continue;
         }
-        drawInstance( renderer, instance, matrix * instance.Matrix, colorTransform * instance.ColorTransform,
+        drawInstance( renderer, instance, clip, matrix * instance.Matrix, colorTransform * instance.ColorTransform,
                       stageToCanvas );
     }
     while ( !masks.empty() ) {
@@ -1893,7 +2038,8 @@ void FlashPlayer::drawClip( Renderer2D &renderer, const Clip &clip, const FlashM
     }
 }
 
-void FlashPlayer::drawInstance( Renderer2D &renderer, const Instance &instance, const FlashMatrix &matrix,
+void FlashPlayer::drawInstance( Renderer2D &renderer, const Instance &instance, const Clip &owner,
+                                const FlashMatrix &matrix,
                                 const FlashColorTransform &colorTransform, const FlashMatrix &stageToCanvas ) {
     if ( colorTransform.Mul[3] <= 0.0f && colorTransform.Add[3] <= 0.0f ) {
         return;
@@ -1918,9 +2064,10 @@ void FlashPlayer::drawInstance( Renderer2D &renderer, const Instance &instance, 
         break;
     }
     if ( definitions.getType( instance.CharacterId ) == eFlashCharacterType::CT_EditText ) {
-        // Variables of edit texts are resolved from the root (absolute paths)
-        // or the clip owning the text field.
-        drawEditText( renderer, *definitions.getEditText( instance.CharacterId ), root, matrix, colorTransform,
+        // Variables of edit texts are resolved from the clip owning the text
+        // field (relative paths such as "../../:cur_power" of SHOPSCAR's
+        // datas_base, absolute "/:" paths from the root).
+        drawEditText( renderer, *definitions.getEditText( instance.CharacterId ), owner, matrix, colorTransform,
                       stageToCanvas );
     }
 }
@@ -1990,7 +2137,6 @@ const Font *FlashPlayer::findFont( uint16_t fontId ) const {
 void FlashPlayer::drawEditText( Renderer2D &renderer, const FlashEditText &text, const Clip &owner,
                                 const FlashMatrix &matrix, const FlashColorTransform &colorTransform,
                                 const FlashMatrix &stageToCanvas ) {
-    (void)owner;
     const Font *pFont = findFont( text.FontId );
     if ( pFont == nullptr ) {
         return;
@@ -1998,7 +2144,13 @@ void FlashPlayer::drawEditText( Renderer2D &renderer, const FlashEditText &text,
     std::string content;
     bool bHasValue = false;
     if ( !text.VariableName.empty() ) {
-        Value value = const_cast<FlashPlayer *>( this )->lookupVariable( &root, text.VariableName, nullptr );
+        Value value =
+            const_cast<FlashPlayer *>( this )->lookupVariable( const_cast<Clip *>( &owner ), text.VariableName, nullptr );
+        if ( value.Type == Value::eType::Undefined && &owner != &root ) {
+            // Former behaviour (root scope) kept as a fallback for the movies
+            // whose variables are only set on the root [INF].
+            value = const_cast<FlashPlayer *>( this )->lookupVariable( &root, text.VariableName, nullptr );
+        }
         if ( value.Type != Value::eType::Undefined ) {
             content = value.toString();
             bHasValue = true;

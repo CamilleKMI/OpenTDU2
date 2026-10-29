@@ -27,6 +27,7 @@ public:
     static constexpr uint32_t kTrackFov = 0x00766f46;      // "Fov"
     static constexpr uint32_t kTrackMessage = 0x73d8ccae;  // "Message"
     static constexpr uint32_t kTrackFx = 0x00007846;       // "Fx"
+    static constexpr uint32_t kTrackVisibility = 0xd2df4b2c; // "Visibility"
     static constexpr uint32_t kClassCamera = 0x2a043536;
     static constexpr uint32_t kClassActor = 0xd039fa46;
     static constexpr uint16_t kRefMessage = 0x020b; // REFS: actor message string (no hashcode)
@@ -36,6 +37,11 @@ public:
         uint32_t NumComponents = 0;
         std::vector<float> Times;
         std::vector<float> Values; // NumComponents per key (raw dwords)
+        // Raw key values (KeySize bytes per key): the Visibility keys of
+        // the props are 1 byte (meeting_tess CF_Phone / CF_KCar: 00 / 01),
+        // 4 bytes for the other actors (first byte 01) [DATA].
+        uint32_t KeySize = 0;
+        std::vector<uint8_t> Bytes;
     };
 
     // Actor property track (id 0xd3593709): { u16 0; u16 1; u32 Size; u32 Id;
@@ -68,6 +74,9 @@ public:
         Vector3f samplePosition( float time ) const;
         Quaternionf sampleRotation( float time ) const;
         float sampleFloat( uint32_t trackId, float time, float defaultValue ) const;
+        // Visibility track: first byte of the last key <= time (stepped);
+        // defaultValue without the track or before its first key.
+        bool sampleVisibility( float time, bool defaultValue ) const;
     };
 
     // REFS entry: { u16 Type (0x0302 ANIM, 0x0306 MORPH); u16 Size; u64
@@ -84,6 +93,12 @@ public:
 
     inline float getDuration() const { return duration; }
     inline const Matrix4x4f &getOrigin() const { return origin; }
+    // Rotation part of the scene origin (q.rotate(v) == origin.transformVector(v)).
+    // The actor / camera Heading keys are scene-local: the Eden heading in
+    // the parent frame is heading * conj(originRotation) (meeting_tess
+    // M_MEETING_TESS_thedream.sce has a 130 degree origin rotation; the earlier
+    // scenes have none) [DATA].
+    Quaternionf getOriginRotation() const;
     inline const std::vector<Object> &getObjects() const { return objects; }
     const Object *findObject( const char *pName ) const;
     const Object *findObjectByHash( uint32_t nameHash ) const;

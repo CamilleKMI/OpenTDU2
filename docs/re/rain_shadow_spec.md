@@ -213,6 +213,7 @@ the full (1-N·V) cube reflection.
   water) [unknown].
 
 ## A.6 Other rain FX (inactive in SS_Death_Valley)
+Falling rain (WFX_Rain blocks, WFX_Drop, WFX_Splash) and the rain sound: see `rain_spec.md`.
 * Droplets on camera (FUN_00aa2100, TD_Droplets_Oncam): `half_pixel = (0.5/W, 0.5/H)`,
   `refract = (k²/W, k²/H, rain_droplets_refraction_oncam, -)` with k = `+0x38ac`; per droplet the alpha byte is
   `round(life/lifeTime · clamp(2·rain_alpha/255, 0, 1) · 255)`. [CODE]

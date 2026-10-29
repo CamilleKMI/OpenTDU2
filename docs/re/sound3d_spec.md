@@ -295,6 +295,51 @@ data.** Its meaning is [ENC].
 | 0x575900 | (src, startTime) | Play |
 | 0x575a70 / 0x575d70 | | stop / release |
 
+### 4.6 Spot exterior fx loops (fountains) [DATA + CODE; attenuation INF]
+
+The looping sounds of the fountains are **not** ambience banks (`islands/<island>/sound/ambience/ambiences.xmb` is
+the zone ambience: day / night beds, thunder) and not SC emitters: they are the " DNS" nodes of the `Entity__Fx`
+effects of the spot exterior bank itself [DATA]:
+
+- ecas.bnk: `Fx__SourceData` VFX_BigFountain / VFX_MidFountain, `SoundList[] { SoundNode }` -> `Fx__Sound`
+  `SoundFile` -> `sound\casino\sfx\s_fountain_loop_01_AMBIENCE_EXTERNAL_SFX.wav` (41985 bytes) / `_02_` (24019
+  bytes), bank group 10 / sub 6, **in ecas.bnk** (no separate sound bank).
+- .bfx " DNS" node (vfx_casino_F1E3... / 8C2B...): name `S_fountain_loop_01/02`, LoopCount (+0x5c) -1, Vol
+  **0.708** (-3 dB), Ptch 1, CnIn / CnOut **179.98**, CnOutVol 0.25, **ClpNr 10, ClpMd 20, ClpFr 40**, ClpMdVol 0,
+  ClpAttn 0, client **14 = AmbienceExternalSfx** (pipeline Sfx, 5 inputs: positional). Node matrix identity: the
+  source is at the entity position.
+- 6 entities (`V_Fx_Fountain_*`, AutoStart 1): world positions with the ECAS spot frame (2642.0, 1.7, 1588.1):
+  Big (2709.3, 3.4, 1475.1), Big_01 (2748.8, 3.4, 1511.7), Middle (2704.1, 3.1, 1465.2), Middle_01 (2720.1, 3.1,
+  1480.0), Middle_02 (2743.1, 3.1, 1501.4), Middle_03 (2759.0, 3.1, 1516.1).
+- The other banks with Entity__Fx: e_hotela (water sheets) and eph_l3a (butterflies) have no SoundList entry
+  [DATA]; the Ibiza vfx_env.bnk ambient effects have none either.
+- Start: Entity__Fx loader FUN_00b18040 (+0xe8 Fx root hash, +0xfc AutoStart) and FUN_00b17b70 (FUN_0048e2f0 ->
+  FUN_00a9ba20 / FUN_00b17ac0: the edFx instance; the edFxSound source is created by edFx [ENC]) [CODE].
+
+Waterfalls (Hawai) [DATA]: the splash is a world ambient effect (`VFX_EnvWaterfall_Splash`, hawai vfx_env.bnk, 22
+`-F.pmi` placements, no SoundList: `particles_spec.md` 7); the water noise is the **ambience environment** TypeID 11
+`Cascade` of `islands/hawai/sound/ambience/ambiences.xmb` (`waterfall_08.wav` day and night, ClassID 8,
+PriorityRank 3, ClipNear 5, ClipFar 500, Attenuation 0.999, Volume 1). The ambience manager FUN_00cc13c0 loads
+`%sIslands/%s/Sound/Ambience/Ambiences.xmb` (Environments, ReverbPresets, Rain, Lightning) and FUN_00cbf3e0
+swaps the day / night resource of an environment (`%sIslands/%s/Sound/Ambience/%s.wav`) [CODE]; where an
+environment applies on the map (the zone placement of TypeID 11) was not decoded in this pass: **not implemented**
+(open).
+
+OpenTDU2: `SpotExterior::startSounds` (with the particle effects, World Viewer): `CinematicSounds` on the exterior
+bank (same Fx chain and .bfx parser as the cinematics), one looped 3D voice per AutoStart Entity__Fx and spot frame
+at `frame * entity position`; stopped with the exterior. Listener = the free-fly camera (`setListener` every tick),
+mix preset of the game mode FREERIDE [INF: the tool stands for the free roaming mode]. Distance gain: the [INF]
+curve of 7 (1 up to 10 m, 0 at 20 m).
+
+Test (World Viewer, casino ECAS, `-campos 2733,6,1482 -camyaw 35`, `OTDU_AUDIO_LOG=1 -audiodump`): 6 voices
+created (client 14, bus Sfx); Middle_01 at 13.4 m -> attenuation 0.66, gains BL 0.06 / BR 0.22 (the source is
+behind right of the camera), the others beyond 20 m -> 0; the 3.33 s offline mix has RMS L 0.0020 / R 0.0071
+(`scratchpad/fx3/cas2.log`; the WAV dump was deleted with the staged data).
+
+Test without an audio device: `-audiodump <file.wav>` runs the mixer offline (48 kHz stereo float), advanced by
+the game time step, and writes the mix; `OTDU_AUDIO_LOG=1` logs every voice (distance, attenuation, bus gains)
+once a second.
+
 ---------------------------------------------------------------------------------------------------
 ## 5. Listener [CODE]
 

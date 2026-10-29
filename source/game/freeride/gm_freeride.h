@@ -1,7 +1,9 @@
 #pragma once
 
 #include "game/cinematic/cinematic_car.h"
+#include "game/freeride/car_accessories.h"
 #include "game/freeride/chase_camera.h"
+#include "game/freeride/fade_freeride.h"
 #include "game/freeride/first_outro.h"
 #include "game/freeride/freeride_hud.h"
 #include "game/gm_base.h"
@@ -9,6 +11,7 @@
 #include "physics/vehicle_dynamics.h"
 #include "render/eden/eden_scene_view.h"
 #include "render/eden/eden_weather.h"
+#include "world/road_network.h"
 
 // "FREERIDE" (mode 1) entered by story step 2 "First Freeride"
 // (FUN_00b10da0 case 3, docs: /tmp/claude-0/spec_freeride.md 1):
@@ -18,9 +21,9 @@
 //   2. at its end (listener event 3) the game camera comes back
 //      (FUN_00ca18b0), "/:IsWalkmode" false, pop_goal loc 5038 "Enjoy!",
 //      TUTO_ENJOY, roof opened (FUN_00c3fcc0), timer 90 s;
-//   3. when the timer runs out: C_FADE_FREERIDE (fade_freeride.bnk, white
-//      fade, Tess knocks) -> story step 3 "Meeting Tess" (not implemented:
-//      the screen stays white).
+//   3. when the timer runs out: C_FADE_FREERIDE (fade_freeride.bnk, 15 s,
+//      white fade, Tess knocks) -> at its end story step 3 "Meeting Tess"
+//      (game mode CINE, C_MEETING_TESS, game/cine/gm_cine.h).
 // The player drives the current car (387 California) with VehicleDynamics
 // on the streamed island (sector .shk / -R.shk collision), chase camera
 // from CamerasInGame.xmb, HUD (FreeRideHud).
@@ -41,21 +44,31 @@ public:
 private:
     enum class eState { Outro, Drive, Fade };
 
+    // Story step 8 "Tuto FROG" (FUN_00b10da0 case 9) entered from the used
+    // car dealer (GMShop): hand-off stub (docs/re/story_spec.md 5.3).
+    bool bStep8Stub = false;
+    std::string step8Text;
+
     EdenSceneView view;
     WeatherLibrary gameWeathers;
     const WeatherPreset *pWeather = nullptr;
     FirstOutro outro;
+    FadeFreeride fade;
+    bool bCineRequested = false;
     CinematicCar car;
     CinematicCar::Desc carDesc;
     VehicleSetup setup;
     VehicleDynamics vehicle;
     VehicleWorldCollision collision;
+    RoadNetwork roads; // ibiza.bnk road network (tunnel detection)
     ChaseCamera chase;
     FreeRideHud hud;
+    CarAccessories accessories;
     EdenSceneView::Camera camera;
     eState state = eState::Outro;
     float stepTimer = 0.0f;       // story step timer (this[7], 90 s)
     float fadeTime = 0.0f;
+    float lastBrakeInput = 0.0f; // brake pedal of the last vehicle step (car brake lights)
     bool bEnvironmentAssigned = false;
     bool bLoaded = false;
     Matrix4x4f carWorld;

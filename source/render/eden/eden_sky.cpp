@@ -2,10 +2,14 @@
 #include "eden_sky.h"
 
 #include "render/eden/eden_weather.h"
+#include "filesystem/gs_file.h"
 #include "render/gs_render.h"
 
 namespace {
 constexpr uint64_t kDomeShaderSet = 0x2428b45eec949165ull; // td_dome.sob
+constexpr uint64_t kMoonShaderSet = 0x2428b45eec949166ull; // td_moon.sob (MatMoon, FUN_00c384f0)
+constexpr double kMoonDistance = 100000.0;                  // 0x00f4ac08
+constexpr double kMoonSizeFactor = 10.0;                    // 0x00f49820
 constexpr uint32_t kRings = 32;
 constexpr uint32_t kSegments = 64;
 
@@ -84,6 +88,55 @@ bool EdenSky::initialize( EdenRenderer &renderer ) {
     material.bDepthWrite = false;
     renderer.updateProgram( material );
     bReady = material.pProgram != nullptr && pVertexBuffer != nullptr && pIndexBuffer != nullptr;
+
+    // MatMoon (FUN_00c384f0): 4 vertices (-1,-1) (-1,1) (1,1) (1,-1) with
+    // uv = (x, y) in [0, 1] corners, indices 0 1 3 2 (strip); SRCALPHA /
+    // INVSRCALPHA, texture "MOON" (fx/weatherfx.bnk).
+    const std::string weatherFxPath = gpFile->getBankFolder() + "fx/weatherfx.bnk";
+    if ( weatherFxBank.load( weatherFxPath.c_str() ) ) {
+        gpRender->getTextureCache().loadBankTextures( weatherFxBank, weatherFxBank.getPath().c_str() );
+        GPUTexture *pMoon = gpRender->getTextureCache().find( weatherFxBank.getPath().c_str(), "moon" );
+        const float moonVertices[4][5] = {
+            { -1.0f, -1.0f, 0.0f, 0.0f, 0.0f },
+            { -1.0f, 1.0f, 0.0f, 0.0f, 1.0f },
+            { 1.0f, 1.0f, 0.0f, 1.0f, 1.0f },
+            { 1.0f, -1.0f, 0.0f, 1.0f, 0.0f },
+        };
+        const uint32_t moonIndices[6] = { 0, 1, 3, 3, 1, 2 };
+        pMoonVertexBuffer =
+            device.createBuffer( sizeof( moonVertices ), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, moonVertices );
+        pMoonIndexBuffer = device.createBuffer( sizeof( moonIndices ), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, moonIndices );
+        moonMesh.NumStreams = 1;
+        moonMesh.pStreamBuffers[0] = pMoonVertexBuffer;
+        moonMesh.Strides[0] = 20;
+        RawVertexAttribute attribute;
+        attribute.Usage = 0;
+        attribute.Format = VAF_POSITION_R32G32B32_SFLOAT;
+        attribute.Offset = 0;
+        moonMesh.Attributes.push_back( attribute );
+        attribute.Usage = 5;
+        attribute.Format = VAF_TEXCOORD_R32G32_SFLOAT;
+        attribute.Offset = 12;
+        moonMesh.Attributes.push_back( attribute );
+        moonMesh.pIndexBuffer = pMoonIndexBuffer;
+        moonMesh.IndexCount = 6;
+        moonMesh.computeLayoutKey();
+        moonMaterial.Name = "MatMoon";
+        moonMaterial.ShaderSetGUID = kMoonShaderSet;
+        moonMaterial.NumSlots = 1;
+        moonMaterial.pTextures[0] = pMoon;
+        moonMaterial.TextureHashes[0] = pMoon != nullptr ? GetIdentifier64bit( "MOON" ) : 0;
+        moonMaterial.SrcBlend = 5; // +0x38
+        moonMaterial.DstBlend = 6; // +0x39
+        moonMaterial.CullMode = 1;
+        moonMaterial.bDepthTest = true;
+        moonMaterial.bDepthWrite = false;
+        moonMaterial.Bucket = 0x14; // +0x20
+        renderer.updateProgram( moonMaterial );
+        bMoonReady = pMoon != nullptr && moonMaterial.pProgram != nullptr;
+        OTDU_LOG_DEBUG( "EdenSky: moon %s, program %s\n", pMoon != nullptr ? "found" : "missing",
+                        moonMaterial.pProgram != nullptr ? moonMaterial.pProgram->Name.c_str() : "(none)" );
+    }
     return bReady;
 }
 
@@ -91,9 +144,18 @@ void EdenSky::destroy() {
     if ( gpRender != nullptr ) {
         gpRender->getDevice().destroyBuffer( pVertexBuffer );
         gpRender->getDevice().destroyBuffer( pIndexBuffer );
+        gpRender->getDevice().destroyBuffer( pMoonVertexBuffer );
+        gpRender->getDevice().destroyBuffer( pMoonIndexBuffer );
+        if ( !weatherFxBank.getEntries().empty() ) {
+            gpRender->getTextureCache().releaseOwner( weatherFxBank.getPath().c_str() );
+        }
     }
+    weatherFxBank.unload();
     pVertexBuffer = pIndexBuffer = nullptr;
+    pMoonVertexBuffer = pMoonIndexBuffer = nullptr;
+    moonMesh = EdenMesh();
     bReady = false;
+    bMoonReady = false;
 }
 
 void EdenSky::setupAtmosphere( EdenSceneParams &scene, const WeatherPreset *pWeather ) {
@@ -173,4 +235,24 @@ void EdenSky::draw( EdenRenderer &renderer ) {
     if ( bReady ) {
         renderer.draw( mesh, material, Matrix4x4f::Identity() );
     }
+}
+
+void EdenSky::drawMoon( EdenRenderer &renderer, const EdenSceneParams &scene, const WeatherPreset *pWeather ) {
+    if ( !bMoonReady || pWeather == nullptr ) {
+        return;
+    }
+    // FUN_0092ed80: PosMoon = (-sundirection * 100000, Skydome_moonPercent),
+    // SizeMoon = (Skydome_moonSize * 10, moon object +0x1400..+0x1408 [not
+    // traced; unused by the textured pixel shader]).
+    const float percent = pWeather->getFloat( "Skydome_moonPercent", 0.0f );
+    if ( percent <= 0.0f ) {
+        return;
+    }
+    const Vector3f sun = scene.SunDirection;
+    const float distance = static_cast<float>( kMoonDistance );
+    EdenDrawParams params;
+    params.Vectors["PosMoon"] = Vector4f( -sun.x * distance, -sun.y * distance, -sun.z * distance, percent );
+    params.Vectors["SizeMoon"] =
+        Vector4f( pWeather->getFloat( "Skydome_moonSize", 0.0f ) * static_cast<float>( kMoonSizeFactor ), 0.0f, 0.0f, 0.0f );
+    renderer.draw( moonMesh, moonMaterial, Matrix4x4f::Identity(), &params );
 }

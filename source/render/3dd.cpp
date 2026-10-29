@@ -126,6 +126,8 @@ bool Render3DD::parse( const uint8_t *pFile, uint32_t fileSize, bool bMirrorX ) 
         for ( uint32_t lod = 0; lod < numLods && lod < 3; lod++ ) {
             if ( instancePayload + 0x54 + lod * 0x14 + 4 <= fileSize ) {
                 node.LodDistances.push_back( ReadAt<float>( pFile, instancePayload + 0x54 + lod * 0x14 ) );
+                auto lodObjectIt = hashEntries.find( ReadAt<uint32_t>( pFile, instancePayload + 0x50 + lod * 0x14 ) );
+                node.LodObjects.push_back( lodObjectIt != hashEntries.end() ? lodObjectIt->second : 0 );
             }
         }
         auto objectIt = hashEntries.find( objectEntryOffset );

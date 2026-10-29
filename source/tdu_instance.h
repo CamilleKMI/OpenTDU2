@@ -33,6 +33,9 @@ public:
     inline bool hasRequestedExit() const { return bRequestedExit; }
     inline float getTotalTime() const { return totalTime; }
     inline uint64_t getFrameIndex() const { return frameIndex; }
+    // Previous game mode (DAT_00fd5080 +0x12c, the mode before the current
+    // +0x128) [CODE]: GM_None for the first mode.
+    inline eGameMode getPreviousGameMode() const { return previousGameMode; }
 
 public:
     TestDriveGameInstance();
@@ -50,6 +53,8 @@ private:
     std::vector<GameSystem *> services;
     std::unique_ptr<GameMode> pActiveGameMode;
     eGameMode nextGameMode;
+    eGameMode currentGameMode = eGameMode::GM_None;
+    eGameMode previousGameMode = eGameMode::GM_None;
     bool bRequestedExit;
     bool bShowDebugUI;
     float totalTime;

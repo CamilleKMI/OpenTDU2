@@ -47,6 +47,35 @@ public:
     void tick( float deltaTime, const State &state );
     void draw( Renderer2D &renderer, const VehicleWorldCollision *pCollision );
     void setVisible( bool bVisible ) { bShown = bVisible; }
+    // Zone badge (Ibiza areas 1 / 2, DBCruisingZones i1 / i2), shown by
+    // default; FREE_DRIVE (developer tool) hides it on the other islands.
+    void setZoneVisible( bool bVisible ) { bZoneShown = bVisible; }
+    // GPS target (MISSION: the event finish, story_spec 4): marker on the
+    // minimap (clamped to its border when outside) and the distance; the
+    // game's GPS route drawing is [ENC] [INF].
+    void setTarget( bool bEnable, float x = 0.0f, float z = 0.0f ) {
+        bTarget = bEnable;
+        targetX = x;
+        targetZ = z;
+    }
+
+    // TESTCAR (FUN_00a90990 / FUN_00a90850): HUD /:IsTest, the countdown clip
+    // /HUD/time_cd shown (FUN_00a12300(1): visible + gotoAndPlay "open") and
+    // /:MinCd / /:SecCd / /:CentCd (FUN_00968ef0 bindings, ranges 0..999 /
+    // 0..59 / 0..99, 2 digits; FUN_00a11120 split of the remaining time:
+    // ms = round(t * 1000 + 0.5)) [CODE + DATA].
+    void setTestDrive( bool bEnable );
+    void setCountdown( float remaining );
+
+    // Accessories menu HUD/ig_menu (docs/re/accessories_spec.md 3):
+    // FUN_00928c10 / FUN_00928840: /:HasHood, /:HasWindows, /:HasTurnSignals,
+    // goto "open" (the clip calls SetIcons: icon_1 top = roof, icon_2 right =
+    // right blinker, icon_3 bottom = windows, icon_4 left = left blinker,
+    // "lock" overlays from the Has* flags); FUN_00928e70: ValidIGM(<label>)
+    // (valid_icon animation, then "close"); FUN_00929100: goto "close".
+    void openAccessoryMenu( bool bHasHood, bool bHasWindows, bool bHasTurnSignals );
+    void validAccessory( const std::string &label );
+    void closeAccessoryMenu();
 
 private:
     FlashPlayer hud;
@@ -54,6 +83,9 @@ private:
     State state;
     float goalTimer = -1.0f;
     bool bShown = false;
+    bool bZoneShown = true;
+    bool bTarget = false;
+    float targetX = 0.0f, targetZ = 0.0f;
     std::string zoneShort;
     std::string zoneName;
     int32_t zoneIndex = 0;

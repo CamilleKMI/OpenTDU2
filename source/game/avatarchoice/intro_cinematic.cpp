@@ -1,6 +1,8 @@
 #include "shared.h"
 #include "intro_cinematic.h"
 
+#include "game/avatar/ik_offsets.h"
+
 #include "audio/gs_audio.h"
 #include "config/gs_config.h"
 
@@ -83,7 +85,7 @@ bool IntroCinematic::load( const Setup &newSetup ) {
             commandCallback( command, args );
         }
     } );
-    ui.load( gpFlash->getMovie( "intro" ) );
+    ui.load( gpFlash->getMovie( setup.UiMovie.c_str() ) );
     if ( ui.isLoaded() ) {
         ApplyFlashLocalization( ui );
         bPendingUiLocalization = false;
@@ -99,9 +101,11 @@ bool IntroCinematic::load( const Setup &newSetup ) {
     // Cinematic start (FUN_00b3eba0, CinProps bit 4 clear): black stripes on,
     // only in the 4:3 screen ratio mode (DAT_00fe4c78 == 0).
     // GENERAL.vmf: letterbox and the objective box (pop_goal).
-    general.setFSCommandCallback( [this]( const std::string &command, const std::string & ) {
+    general.setFSCommandCallback( [this]( const std::string &command, const std::string &args ) {
         if ( command == "sbdd" ) {
             ApplyFlashLocalization( general );
+        } else if ( generalCommandCallback ) {
+            generalCommandCallback( command, args );
         }
     } );
     if ( general.load( gpFlash->getMovie( "general" ) ) ) {
@@ -120,6 +124,9 @@ bool IntroCinematic::load( const Setup &newSetup ) {
     }
     sceneRotation = Quaternionf::FromAxisAngle( Vector3f( 0.0f, 1.0f, 0.0f ), heading );
     sceneOrigin = Matrix4x4f::Translation( housePosition ) * Matrix4x4f::FromQuaternion( sceneRotation );
+    exteriorOrigin = sceneOrigin;
+    collisionLift = 0.0f;
+    bSceneMoved = false;
     sounds.setSceneOrigin( sceneOrigin );
     const int32_t radius = CmdLine::HasArg( "-sectorradius" ) ? CmdLine::GetArgInt( "-sectorradius", 1 ) : 1;
     if ( !view.initialize( "ibiza", housePosition, setup.bWorld ? radius : -1 ) ) {
@@ -144,6 +151,15 @@ bool IntroCinematic::load( const Setup &newSetup ) {
         }
         break;
     }
+    if ( setup.bExteriorCollision && collision.getNumTriangles() == 0 && collision.Boxes.empty() ) {
+        for ( const BankEntry *pShk : exteriorBank.findEntriesByExtension( "shk" ) ) {
+            if ( LoadHavokCollision( pShk->pData, pShk->Size, collision, true ) ) {
+                OTDU_LOG_INFO( "IntroCinematic: exterior collision %s: %zu triangles, %zu boxes\n", pShk->Name.c_str(),
+                               collision.Indices.size() / 3, collision.Boxes.size() );
+                break;
+            }
+        }
+    }
     applyShadowConfig( "CINE_DEFAULT" );
     camera = EdenSceneView::Camera();
     camera.Position = housePosition;
@@ -162,10 +178,13 @@ void IntroCinematic::unload() {
     view.clearLightmapMaterials();
     view.destroy();
     car.unload();
+    showCars.clear();
     bCarEnvironment = false;
     bCarStaticCube = false;
     entityPlacements.clear();
     cinCarHashcodes.clear();
+    carActorName.clear();
+    actorMessages.clear();
     sets.clear();
     reflectSets.clear();
     props.clear();
@@ -179,6 +198,10 @@ void IntroCinematic::unload() {
         gpRender->getTextureCache().releaseOwner( exteriorBank.getPath().c_str() );
     }
     exteriorBank.unload();
+    if ( !interiorBank.getEntries().empty() ) {
+        gpRender->getTextureCache().releaseOwner( interiorBank.getPath().c_str() );
+    }
+    interiorBank.unload();
     if ( !introBank.getEntries().empty() ) {
         gpRender->getTextureCache().releaseOwner( introBank.getPath().c_str() );
     }
@@ -275,6 +298,11 @@ const IntroCinematic::Definition *IntroCinematic::findDefinition( const std::str
     return nullptr;
 }
 
+uint32_t IntroCinematic::getCinProps( const std::string &name ) const {
+    const Definition *pDef = findDefinition( name );
+    return pDef != nullptr ? pDef->CinProps : 0;
+}
+
 const std::string &IntroCinematic::getMainName() const {
     static const std::string kEmpty;
     return main.pDef != nullptr ? main.pDef->Name : kEmpty;
@@ -301,6 +329,10 @@ void IntroCinematic::start( Playing &playing, const Definition *pDef, bool bLoop
     if ( playing.Time <= 0.0f ) {
         updateFx( playing, -1.0f, playing.Time );
     }
+    if ( bMain ) {
+        actorMessages.clear();
+        collectActorMessages( playing, -1.0f, playing.Time );
+    }
     playing.PreviousTime = playing.Time;
 }
 
@@ -315,7 +347,7 @@ void IntroCinematic::stop( Playing &playing ) {
     playing.PreviousTime = -1.0f;
 }
 
-bool IntroCinematic::playMain( const std::string &name, bool bStopPrevious ) {
+bool IntroCinematic::playMain( const std::string &name, bool bStopPrevious, float startTime ) {
     // FUN_00da7fd0: the previous main cinematic is stopped (no event 7).
     const Definition *pDef = findDefinition( name );
     if ( pDef == nullptr ) {
@@ -325,8 +357,9 @@ bool IntroCinematic::playMain( const std::string &name, bool bStopPrevious ) {
     (void)bStopPrevious;
     OTDU_LOG_DEBUG( "IntroCinematic: main %s\n", name.c_str() );
     start( main, pDef, ( pDef->CinProps & kCinPropLoop ) != 0, ( pDef->CinProps & kCinPropNoCamera ) != 0,
-           main.pDef == nullptr && name == "C_INTRO" ? static_cast<float>( CmdLine::GetArgInt( "-cinetime", 0 ) )
-                                                    : 0.0f );
+           startTime >= 0.0f ? startTime
+           : main.pDef == nullptr && name == "C_INTRO" ? static_cast<float>( CmdLine::GetArgInt( "-cinetime", 0 ) )
+                                                      : 0.0f );
     return true;
 }
 
@@ -413,6 +446,9 @@ void IntroCinematic::advance( Playing &playing, float deltaTime, bool bMain ) {
             t = duration - 0.001f;
             processMessages( playing, from, t, bMain );
             updateFx( playing, from, t );
+            if ( bMain ) {
+                collectActorMessages( playing, from, t );
+            }
             playing.Time = t;
             playing.PreviousTime = t;
             endEvents.push_back( pDef->Name );
@@ -432,6 +468,9 @@ void IntroCinematic::advance( Playing &playing, float deltaTime, bool bMain ) {
     } else {
         processMessages( playing, from, t, bMain );
         updateFx( playing, from, t );
+        if ( bMain ) {
+            collectActorMessages( playing, from, t );
+        }
     }
     playing.Time = t;
     playing.PreviousTime = t;
@@ -509,6 +548,52 @@ void IntroCinematic::processMessages( const Playing &playing, float from, float 
 
 void IntroCinematic::stopMusic() { sounds.stop( musicVoices ); }
 
+void IntroCinematic::collectActorMessages( const Playing &playing, float from, float to ) {
+    // Object "Message" tracks of the current shot's scene, keys in the
+    // scene time range crossed (same range rule as the scene Fx tracks).
+    const Cinematic &cinematic = playing.pDef->Cin;
+    const Cinematic::Shot *pShot = cinematic.getShot( Max( to, 0.0f ) );
+    if ( pShot == nullptr || pShot->Scene >= playing.pDef->Scenes.size() ) {
+        return;
+    }
+    const Cinematic::Shot *pPreviousShot = from >= 0.0f ? cinematic.getShot( from ) : nullptr;
+    const float sceneTime = pShot->getSceneTime( to );
+    const float previousSceneTime =
+        pPreviousShot == pShot && from >= 0.0f ? pShot->getSceneTime( from ) : pShot->CameraStart - 1e-4f;
+    const CinematicScene &scene = playing.pDef->Scenes[pShot->Scene];
+    std::vector<std::pair<float, ActorMessage>> crossed;
+    for ( const CinematicScene::Object &object : scene.getObjects() ) {
+        for ( const CinematicScene::Track &track : object.Tracks ) {
+            if ( track.Id != CinematicScene::kTrackMessage || track.NumComponents < 1 ) {
+                continue;
+            }
+            for ( size_t k = 0; k < track.Times.size(); k++ ) {
+                const float t = track.Times[k];
+                const bool bCrossed = from < 0.0f ? t <= sceneTime : ( t > previousSceneTime && t <= sceneTime );
+                if ( !bCrossed ) {
+                    continue;
+                }
+                uint32_t ref = 0;
+                memcpy( &ref, &track.Values[k * track.NumComponents], sizeof( ref ) );
+                if ( ref < scene.getReferences().size() ) {
+                    crossed.push_back( { t, ActorMessage{ object.Name, scene.getReferences()[ref].Name } } );
+                }
+            }
+        }
+    }
+    std::stable_sort( crossed.begin(), crossed.end(),
+                      []( const auto &a, const auto &b ) { return a.first < b.first; } );
+    for ( auto &entry : crossed ) {
+        actorMessages.push_back( std::move( entry.second ) );
+    }
+}
+
+std::vector<IntroCinematic::ActorMessage> IntroCinematic::takeActorMessages() {
+    std::vector<ActorMessage> result;
+    result.swap( actorMessages );
+    return result;
+}
+
 bool IntroCinematic::playEmitter( const char *pName ) {
     if ( const auto *pSounds = sounds.findEmitter( pName ) ) {
         sounds.play( *pSounds );
@@ -583,6 +668,86 @@ void IntroCinematic::closeTutorial() {
     }
 }
 
+float IntroCinematic::liftOntoFloor( const std::string &restEntity ) {
+    auto it = entityPlacements.find( restEntity );
+    if ( it == entityPlacements.end() ) {
+        return 0.0f;
+    }
+    const Vector3f rest = it->second.first;
+    float floorY = 0.0f;
+    // Highest floor of the spot collision under a point 3 m above the
+    // entity (below the hotel canopy) [INF].
+    if ( !FindHavokFloor( collision, Vector3f( rest.x, rest.y + 3.0f, rest.z ), 0.0f, 10.0f, floorY ) ) {
+        return 0.0f;
+    }
+    const float lift = floorY - rest.y;
+    collisionLift = lift;
+    bSceneMoved = true;
+    exteriorOrigin = Matrix4x4f::Translation( exteriorOrigin.getTranslation() ) *
+                     Matrix4x4f::FromQuaternion( sceneRotation );
+    sceneOrigin = Matrix4x4f::Translation( Vector3f( 0.0f, lift, 0.0f ) ) * exteriorOrigin;
+    sounds.setSceneOrigin( sceneOrigin );
+    OTDU_LOG_INFO( "IntroCinematic: %s at local y %.3f, spot floor %.3f: cinematic frame lifted by %.3f m\n",
+                   restEntity.c_str(), rest.y, floorY, lift );
+    return lift;
+}
+
+void IntroCinematic::placeEntityAt( const std::string &restEntity, const Vector3f &worldPosition, float worldHeading ) {
+    auto it = entityPlacements.find( restEntity );
+    if ( it == entityPlacements.end() ) {
+        return;
+    }
+    // Entity frame (bank local): T(p) R(conj q) (Eden heading convention).
+    const Vector3f p = it->second.first;
+    const Quaternionf q = it->second.second;
+    const Matrix4x4f entityLocal = Matrix4x4f::Translation( p ) * EdenRotationFromQuaternion( q );
+    // Its yaw: the entity +z axis in the bank frame.
+    const Vector3f forward = entityLocal.transformVector( Vector3f( 0.0f, 0.0f, 1.0f ) );
+    const float entityYaw = std::atan2( forward.x, forward.z );
+    // Target frame of the entity: T(world) R_y(heading) with the same
+    // convention as the spot transform (x' = x cos + z sin).
+    const float yaw = worldHeading - entityYaw;
+    const Quaternionf rotation = Quaternionf::FromAxisAngle( Vector3f( 0.0f, 1.0f, 0.0f ), yaw );
+    const Matrix4x4f frameRotation = Matrix4x4f::FromQuaternion( rotation );
+    const Vector3f rotated = frameRotation.transformPoint( p );
+    collisionLift = 0.0f;
+    bSceneMoved = true;
+    exteriorOrigin = Matrix4x4f::Translation( exteriorOrigin.getTranslation() ) * Matrix4x4f::FromQuaternion( sceneRotation );
+    sceneRotation = rotation;
+    sceneOrigin = Matrix4x4f::Translation( worldPosition - rotated ) * frameRotation;
+    sounds.setSceneOrigin( sceneOrigin );
+    OTDU_LOG_INFO( "IntroCinematic: %s placed at (%.2f, %.2f, %.2f) heading %.4f (frame yaw %.4f)\n", restEntity.c_str(),
+                   worldPosition.x, worldPosition.y, worldPosition.z, worldHeading, yaw );
+}
+
+bool IntroCinematic::ReadSpot( const char *pName, SpotRecord &out ) {
+    std::vector<uint8_t> data;
+    if ( !gpFile->loadFile( ( gpFile->getBankFolder() + "islands/ibiza/level/spots.bin" ).c_str(), data ) ||
+         data.size() < 0x20 || memcmp( data.data() + 0x10, "SPTA", 4 ) != 0 ) {
+        return false;
+    }
+    uint32_t size = 0;
+    memcpy( &size, data.data() + 0x14, 4 );
+    const uint64_t id = GetIdentifier64bit( pName );
+    for ( size_t offset = 0x20; offset + 0x110 <= data.size() && offset < 0x20 + size; offset += 0x110 ) {
+        uint64_t recordId = 0;
+        memcpy( &recordId, data.data() + offset, 8 );
+        if ( recordId == id ) {
+            memcpy( &out.Position, data.data() + offset + 0x10, 12 );
+            memcpy( &out.Heading, data.data() + offset + 0x20, 4 );
+            memcpy( &out.Position2, data.data() + offset + 0x28, 12 );
+            memcpy( &out.Heading2, data.data() + offset + 0x38, 4 );
+            out.Type = data[offset + 0x100];
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IntroCinematic::getGroundHeight( float x, float z, float &outHeight ) const {
+    return const_cast<EdenSceneView &>( view ).getWorld().getHeight( x, z, outHeight );
+}
+
 bool IntroCinematic::getCarWorld( Matrix4x4f &outWorld ) const {
     return car.isLoaded() && computeCarWorld( outWorld );
 }
@@ -621,69 +786,39 @@ bool IntroCinematic::setPlayerSeated( bool bSeated ) {
     return bDriverPose;
 }
 
-// Euro/Bnk/DataBase/IKOffsetDB.bin (FUN_00b97cc0 load, FUN_00b96ba0 parse
-// [CODE]; layout docs/re/driver_seat_spec.md). Big endian (the PC parser
-// byte-swaps when the magic reads "BDKI") [CODE + DATA]:
-//   +0x00 u16 2, u16 3, u32 0, u32 ?, "IKDB"
-//   +0x10 chunk "CAIK", u16 2 (sexes), u16 0, u32, u32
-//   +0x20 u32 numCars, then per car: u32 _id_car,
-//         2 x { f32 seat[5]; 27 x { f32 offset[3]; f32 unused[3] } },
-//         11 x f32[3]
-//   then chunk "BIIK" (bikes).
-// seat[] reads r1..r5 are stored at record +0x220, +0x228, +0x224, +0x230,
-// +0x22c: the driver seat group moves by (0, +0x224, +0x228) = (0, r3, r2)
-// (FUN_00b8ade0) [CODE]. Node offset = the first 3 floats (record entry
-// +0x20, the one FUN_00b7e940 reads) [CODE]. Sex index 1 = woman
-// (FUN_00cabec0() == 1) [INF: DBPNJ _sex 1 = woman].
+// IKOffsetDB.bin record of the car for the player's sex (LoadCarIKOffsets,
+// docs/re/driver_seat_spec.md 1.3): driver seat group (0, r3, r2) and the
+// node offsets.
 bool IntroCinematic::loadDriverIKOffsets( int32_t idCar, bool bWoman ) {
     driverIK = DriverIKOffsets();
-    std::vector<uint8_t> file;
-    const std::string folder = gpFile->getBankFolder();
-    if ( !gpFile->loadFile( ( folder + "DataBase/IKOffsetDB.bin" ).c_str(), file ) &&
-         !gpFile->loadFile( ( folder + "database/ikoffsetdb.bin" ).c_str(), file ) ) {
+    CarIKOffsets offsets;
+    if ( !LoadCarIKOffsets( idCar, bWoman, offsets ) ) {
         return false;
     }
-    auto u32 = [&]( size_t offset ) {
-        return static_cast<uint32_t>( file[offset] ) << 24 | static_cast<uint32_t>( file[offset + 1] ) << 16 |
-               static_cast<uint32_t>( file[offset + 2] ) << 8 | file[offset + 3];
-    };
-    auto f32 = [&]( size_t offset ) {
-        const uint32_t bits = u32( offset );
-        float value;
-        memcpy( &value, &bits, 4 );
-        return value;
-    };
-    constexpr size_t kSexSize = 5 * 4 + 27 * 24;
-    constexpr size_t kCarSize = 4 + 2 * kSexSize + 11 * 12;
-    if ( file.size() < 0x24 || memcmp( file.data() + 0x0c, "BDKI", 4 ) != 0 ||
-         memcmp( file.data() + 0x10, "KIAC", 4 ) != 0 ) {
-        return false;
+    driverIK.SeatY = offsets.driverSeatY();
+    driverIK.SeatZ = offsets.driverSeatZ();
+    for ( uint32_t n = 0; n < 27; n++ ) {
+        driverIK.Node[n] = offsets.Node[n];
     }
-    const uint32_t numCars = u32( 0x20 );
-    for ( uint32_t c = 0; c < numCars && 0x24 + ( c + 1 ) * kCarSize <= file.size(); c++ ) {
-        const size_t car = 0x24 + c * kCarSize;
-        if ( static_cast<int32_t>( u32( car ) ) != idCar ) {
-            continue;
-        }
-        const size_t sex = car + 4 + ( bWoman ? kSexSize : 0 );
-        driverIK.SeatY = f32( sex + 8 );
-        driverIK.SeatZ = f32( sex + 4 );
-        for ( uint32_t n = 0; n < 27; n++ ) {
-            const size_t entry = sex + 20 + n * 24;
-            driverIK.Node[n] = Vector3f( f32( entry ), f32( entry + 4 ), f32( entry + 8 ) );
-        }
-        driverIK.bValid = true;
-        return true;
+    driverIK.bValid = true;
+    return true;
+}
+
+void IntroCinematic::setSeatedShowCar( int32_t showCarIndex ) {
+    if ( showCarIndex != seatedShowCar ) {
+        bDriverIKLoaded = false; // IKOffsetDB record of the new car
     }
-    return false;
+    seatedShowCar = showCarIndex >= 0 && static_cast<size_t>( showCarIndex ) < showCars.size() ? showCarIndex : -1;
 }
 
 void IntroCinematic::updateSeatedPlayer() {
     player.bVisible = false;
     Matrix4x4f carWorld;
     Matrix4x4f seat;
-    if ( !player.Avatar || !bDriverPose || !getCarWorld( carWorld ) ||
-         !car.getNodeModelTransform( "DVRSEAT_LR", seat ) ) {
+    const bool bShowCar = seatedShowCar >= 0;
+    const CinematicCar &car = bShowCar ? *showCars[static_cast<size_t>( seatedShowCar )].Car : this->car;
+    const bool bWorld = bShowCar ? getShowCarWorld( static_cast<size_t>( seatedShowCar ), carWorld ) : getCarWorld( carWorld );
+    if ( !player.Avatar || !bDriverPose || !bWorld || !car.getNodeModelTransform( "DVRSEAT_LR", seat ) ) {
         return;
     }
     if ( !bDriverIKLoaded ) {
@@ -1020,30 +1155,54 @@ void IntroCinematic::drawSets( EdenRenderer &renderer, EdenSceneView::ePass pass
     }
     // Projector actor layers: avatars and the car only.
     const bool bActorsOnly = pass == EdenSceneView::ePass::ProjectorActors;
-    for ( const auto &pSet : sets ) {
+    for ( size_t i = 0; i < sets.size(); i++ ) {
         if ( bActorsOnly ) {
             break;
         }
-        pSet->draw( renderer, sceneOrigin );
+        sets[i]->draw( renderer, i < introSetCount ? sceneOrigin : exteriorOrigin );
     }
     // Props: .sce actor of the main / background cinematic (same entity) or
     // the entity placement.
+    size_t propIndex = 0;
     for ( const Prop &prop : props ) {
         if ( bActorsOnly ) {
             break;
         }
+        propIndex++;
         Matrix4x4f local = prop.Local;
+        const Playing *pActorPlaying = nullptr;
+        const CinematicScene *pActorScene = nullptr;
+        const CinematicScene::Object *pActor = nullptr;
+        float actorTime = 0.0f;
         for ( const Playing *pPlaying : playingOrder() ) {
             const CinematicScene *pScene = nullptr;
             float sceneTime = 0.0f;
             const CinematicScene::Object *pObject = findActor( *pPlaying, prop.EntityHashcode, nullptr, pScene, sceneTime );
             if ( pObject != nullptr && pObject->findTrack( CinematicScene::kTrackPosition ) ) {
-                local = Matrix4x4f::Translation( pObject->samplePosition( sceneTime ) ) *
+                // ActorWorld = T(pos) R(q*) in the scene origin frame.
+                local = pScene->getOrigin() * Matrix4x4f::Translation( pObject->samplePosition( sceneTime ) ) *
                         EdenRotationFromQuaternion( pObject->sampleRotation( sceneTime ) );
+                pActorPlaying = pPlaying;
+                pActorScene = pScene;
+                pActor = pObject;
+                actorTime = sceneTime;
                 break;
             }
         }
-        prop.Model->draw( renderer, sceneOrigin * local * prop.RootInverse );
+        // Visibility track of the actor (CF_Phone / CF_KCar appear in the
+        // hands of Tess / the avatar) [DATA].
+        if ( pActor != nullptr && !pActor->sampleVisibility( actorTime, true ) ) {
+            continue;
+        }
+        if ( prop.Skeleton && pActor != nullptr && pActor->findTrack( kTrackAnimation ) != nullptr ) {
+            std::vector<BoneTransform> locals;
+            sampleActorAnimation( *pActorPlaying, *pActorScene, *pActor, actorTime, *prop.Skeleton, false, locals );
+            std::vector<Matrix4x4f> worldBones, skin;
+            prop.Skeleton->computeSkinMatrices( locals, worldBones, skin );
+            prop.Model->drawSkinned( renderer, sceneOrigin * local, skin );
+            continue;
+        }
+        prop.Model->draw( renderer, ( propIndex <= introPropCount ? sceneOrigin : exteriorOrigin ) * local * prop.RootInverse );
     }
     for ( const Pnj &pnj : pnjs ) {
         if ( pnj.bVisible ) {
@@ -1063,11 +1222,56 @@ void IntroCinematic::drawSets( EdenRenderer &renderer, EdenSceneView::ePass pass
     if ( car.isLoaded() && computeCarWorld( carWorld ) ) {
         car.draw( renderer, carWorld, view.getWeather(), bCarEnvironment );
     }
+    for ( size_t i = 0; i < showCars.size(); i++ ) {
+        Matrix4x4f showWorld;
+        if ( showCars[i].bVisible && getShowCarWorld( i, showWorld ) ) {
+            showCars[i].Car->draw( renderer, showWorld, view.getWeather(), showCars[i].bEnvironment );
+        }
+    }
+}
+
+int32_t IntroCinematic::addShowCar( const CinematicCar::Desc &desc, const std::string &restEntity ) {
+    if ( entityPlacements.find( restEntity ) == entityPlacements.end() ) {
+        OTDU_LOG_WARN( "IntroCinematic: show car rest entity '%s' not found\n", restEntity.c_str() );
+        return -1;
+    }
+    ShowCar showCar;
+    showCar.Car = std::make_unique<CinematicCar>();
+    if ( !showCar.Car->load( desc ) ) {
+        return -1;
+    }
+    showCar.RestEntity = restEntity;
+    showCars.push_back( std::move( showCar ) );
+    return static_cast<int32_t>( showCars.size() ) - 1;
+}
+
+void IntroCinematic::setShowCarVisible( size_t index, bool bVisible ) {
+    if ( index < showCars.size() ) {
+        showCars[index].bVisible = bVisible;
+    }
+}
+
+bool IntroCinematic::getShowCarWorld( size_t index, Matrix4x4f &outWorld ) const {
+    if ( index >= showCars.size() ) {
+        return false;
+    }
+    auto it = entityPlacements.find( showCars[index].RestEntity );
+    if ( it == entityPlacements.end() ) {
+        return false;
+    }
+    outWorld = sceneOrigin * fitOnSceneFloor( *showCars[index].Car, it->second.first, it->second.second );
+    return true;
+}
+
+int32_t IntroCinematic::addSelectable( const Volume &volume ) {
+    selectables.push_back( volume );
+    return static_cast<int32_t>( selectables.size() ) - 1;
 }
 
 bool IntroCinematic::loadCar( const CinematicCar::Desc &desc, const std::string &restEntity,
-                              const std::string &cinCarEntity ) {
+                              const std::string &cinCarEntity, const std::string &carActor ) {
     carRestEntity = restEntity;
+    carActorName = carActor;
     auto it = cinCarHashcodes.find( cinCarEntity );
     carEntityHashcode = it != cinCarHashcodes.end() ? it->second : 0;
     if ( !car.load( desc ) ) {
@@ -1095,14 +1299,16 @@ bool IntroCinematic::computeCarWorld( Matrix4x4f &outWorld ) const {
     Vector3f position;
     Quaternionf rotation;
     bool bPose = false;
-    if ( carEntityHashcode != 0 ) {
+    if ( carEntityHashcode != 0 || !carActorName.empty() ) {
         for ( const Playing *pPlaying : playingOrder() ) {
             const CinematicScene *pScene = nullptr;
             float sceneTime = 0.0f;
-            const CinematicScene::Object *pObject = findActor( *pPlaying, carEntityHashcode, nullptr, pScene, sceneTime );
+            const CinematicScene::Object *pObject =
+                findActor( *pPlaying, carEntityHashcode, carActorName.empty() ? nullptr : carActorName.c_str(), pScene,
+                           sceneTime );
             if ( pObject != nullptr && pObject->findTrack( CinematicScene::kTrackPosition ) ) {
                 position = pScene->getOrigin().transformPoint( pObject->samplePosition( sceneTime ) );
-                rotation = pObject->sampleRotation( sceneTime );
+                rotation = pObject->sampleRotation( sceneTime ) * Conjugate( pScene->getOriginRotation() );
                 bPose = true;
                 break;
             }
@@ -1116,11 +1322,29 @@ bool IntroCinematic::computeCarWorld( Matrix4x4f &outWorld ) const {
         position = it->second.first;
         rotation = it->second.second;
     }
-    const Matrix4x4f local = car.fitOnGround( position, rotation, [this]( float x, float z, float y, float &outHeight ) {
-        return FindHavokFloor( collision, Vector3f( x, y, z ), 0.0f, 3.0f, outHeight );
-    } );
-    outWorld = sceneOrigin * local;
+    outWorld = sceneOrigin * fitOnSceneFloor( car, position, rotation );
     return true;
+}
+
+Matrix4x4f IntroCinematic::fitOnSceneFloor( const CinematicCar &fitCar, const Vector3f &position,
+                                            const Quaternionf &rotation ) const {
+    return fitCar.fitOnGround( position, rotation, [this]( float x, float z, float y, float &outHeight ) {
+        if ( !bSceneMoved || !setup.bExteriorCollision ) {
+            return FindHavokFloor( collision, Vector3f( x, y, z ), 0.0f, 3.0f, outHeight );
+        }
+        // Scene frame moved off the spot frame (liftOntoFloor / placeEntityAt):
+        // the spot collision through the world, else the island terrain.
+        const Vector3f world = sceneOrigin.transformPoint( Vector3f( x, y, z ) );
+        const Vector3f spotLocal = exteriorOrigin.inverse().transformPoint( world );
+        float worldY = 0.0f;
+        if ( FindHavokFloor( collision, spotLocal, 0.0f, 3.0f, outHeight ) ) {
+            worldY = outHeight + exteriorOrigin.getTranslation().y;
+        } else if ( !const_cast<EdenSceneView &>( view ).getWorld().getHeight( world.x, world.z, worldY ) ) {
+            return false;
+        }
+        outHeight = worldY - sceneOrigin.getTranslation().y;
+        return true;
+    } );
 }
 
 void IntroCinematic::renderOffscreen() {
@@ -1133,6 +1357,16 @@ void IntroCinematic::renderOffscreen() {
         if ( GPUTexture *pCube = view.getEnvironmentCube() ) {
             car.assignEnvironment( *gpRender->getEdenRenderer(), pCube );
             bCarEnvironment = true;
+        }
+    }
+    // Showroom cars: the dynamic cube of the view [INF: the shop scene car
+    // slots (FUN_00a507e0) bind the cars of the scene to the view cube].
+    for ( ShowCar &showCar : showCars ) {
+        if ( !showCar.bEnvironment ) {
+            if ( GPUTexture *pCube = view.getEnvironmentCube() ) {
+                showCar.Car->assignEnvironment( *gpRender->getEdenRenderer(), pCube );
+                showCar.bEnvironment = true;
+            }
         }
     }
     view.renderOffscreen();
@@ -1175,6 +1409,25 @@ void IntroCinematic::draw() {
     if ( general.isLoaded() ) {
         general.drawClipOnly( gpRender->get2DRenderer(), "/pop_goal" );
         general.drawClipOnly( gpRender->get2DRenderer(), "/pop_tutorial" );
+        if ( bDialogBoxVisible ) {
+            general.drawClipOnly( gpRender->get2DRenderer(), "/dialog_box" );
+        }
+    }
+}
+
+void IntroCinematic::drawUi() {
+    if ( !bLoaded ) {
+        return;
+    }
+    if ( ui.isLoaded() ) {
+        ui.draw( gpRender->get2DRenderer() );
+    }
+    if ( general.isLoaded() ) {
+        general.drawClipOnly( gpRender->get2DRenderer(), "/pop_goal" );
+        general.drawClipOnly( gpRender->get2DRenderer(), "/pop_tutorial" );
+        if ( bDialogBoxVisible ) {
+            general.drawClipOnly( gpRender->get2DRenderer(), "/dialog_box" );
+        }
     }
 }
 
@@ -1242,6 +1495,7 @@ void IntroCinematic::loadBankModels( const Bank &bank, const BankHashcodes &hash
         pModel->bindUVAnimations( bank );
         view.registerLightmapMaterials( *pModel, bSkipInteriorLods ? EdenSceneView::eLightmapScope::Exterior
                                                                    : EdenSceneView::eLightmapScope::Interior );
+        view.registerNeonMaterials( *pModel );
         return pModel;
     };
     auto firstMesh = []( XmbValue entry, const char *pField ) -> uint64_t {
@@ -1307,6 +1561,14 @@ void IntroCinematic::loadBankModels( const Bank &bank, const BankHashcodes &hash
             continue;
         }
         prop.EntityHashcode = actor["__Hc"].asUInt64();
+        // skeleton[0] (rsc subtype 7, .XSB): a skinned prop.
+        if ( actor.getArraySize( "skeleton" ) > 0 ) {
+            const BankEntry *pSkeleton = hashcodes.find( actor.getArrayElement( "skeleton", 0 )["rsc"].asUInt64(), 0, 7 );
+            auto pParsed = std::make_unique<EdenSkeleton>();
+            if ( pSkeleton != nullptr && pParsed->parse( pSkeleton->pData, pSkeleton->Size ) ) {
+                prop.Skeleton = std::move( pParsed );
+            }
+        }
         Vector3f position, scale;
         Quaternionf rotation;
         ReadPlacement( actor["orient_pos_scale"], position, rotation, scale );
@@ -1329,6 +1591,8 @@ void IntroCinematic::loadSets( const XmbDocument &entities ) {
     view.setPlanarReflectionsEnabled( EdenPlanarReflections::IsEnabledForGameMode( setup.GameModeId ) );
     view.setPlanarReflectionActors( true );
     loadBankModels( introBank, introHashcodes, entities, false );
+    introSetCount = sets.size();
+    introPropCount = props.size();
     XmbValue entityExport = entities.getRoot()["ExportType_Entity"];
     // Entity__PosCam / Entity__CinCar placements (car rest pose).
     for ( const char *pArray : { "ArrayOf_Entity__PosCam", "ArrayOf_Entity__CinCar" } ) {
@@ -1362,6 +1626,25 @@ void IntroCinematic::loadSets( const XmbDocument &entities ) {
         XmbDocument exteriorEntities;
         if ( pExteriorEntities != nullptr && exteriorEntities.load( pExteriorEntities->pData, pExteriorEntities->Size ) ) {
             loadBankModels( exteriorBank, exteriorHashcodes, exteriorEntities, true );
+        }
+    }
+    const std::string interiorPath = gpFile->getBankFolder() + setup.InteriorBank;
+    if ( !setup.InteriorBank.empty() ) {
+        if ( interiorBank.load( interiorPath.c_str() ) ) {
+            gpRender->getTextureCache().loadBankTextures( interiorBank, interiorBank.getPath().c_str() );
+            BankHashcodes interiorHashcodes;
+            interiorHashcodes.load( interiorBank );
+            const BankEntry *pInteriorEntities = interiorBank.findEntry( "entities.xmb" );
+            XmbDocument interiorEntities;
+            if ( pInteriorEntities != nullptr &&
+                 interiorEntities.load( pInteriorEntities->pData, pInteriorEntities->Size ) ) {
+                const size_t before = sets.size();
+                loadBankModels( interiorBank, interiorHashcodes, interiorEntities, false );
+                OTDU_LOG_INFO( "IntroCinematic: interior %s: %zu models\n", setup.InteriorBank.c_str(),
+                               sets.size() - before );
+            }
+        } else {
+            OTDU_LOG_WARN( "IntroCinematic: interior '%s' not found\n", interiorPath.c_str() );
         }
     }
     OTDU_LOG_INFO( "IntroCinematic: %zu set models, %zu props, %zu cameras\n", sets.size(), props.size(),
@@ -1437,19 +1720,15 @@ const EdenAnimation *IntroCinematic::getAnimation( uint64_t hashcode ) {
     return pResult;
 }
 
-void IntroCinematic::animatePnj( Pnj &pnj, const Playing &playing, const CinematicScene &scene,
-                                 const CinematicScene::Object &object, float sceneTime ) {
-    // .sce actor: Position / Heading (actor root) and the Animation track
-    // (avatar_spec 4.1): key k = last T_k <= t, clip time u = f2 - f7 +
-    // (t - T_k), linear crossfade with the previous key during f7 seconds;
-    // the clips loop. The clip reference is replaced by the style anim of
-    // the avatar (additionalsStyleAnims "m" / "w").
-    const EdenSkeleton &skeleton = pnj.Avatar->getSkeleton();
-    std::vector<BoneTransform> locals( skeleton.getNumBones() );
+void IntroCinematic::sampleActorAnimation( const Playing &playing, const CinematicScene &scene,
+                                           const CinematicScene::Object &object, float sceneTime,
+                                           const EdenSkeleton &skeleton, bool bWoman,
+                                           std::vector<BoneTransform> &locals ) {
+    locals.resize( skeleton.getNumBones() );
     for ( uint32_t b = 0; b < skeleton.getNumBones(); b++ ) {
         locals[b] = skeleton.getBindLocal( b );
     }
-    const auto &styleAnims = playing.pDef->StyleAnims[pnj.Avatar->isWoman() ? 1 : 0];
+    const auto &styleAnims = playing.pDef->StyleAnims[bWoman ? 1 : 0];
     const CinematicScene::Track *pTrack = object.findTrack( kTrackAnimation );
     if ( pTrack != nullptr && pTrack->NumComponents >= 10 && !pTrack->Times.empty() ) {
         auto keyField = [pTrack]( size_t key, uint32_t field ) {
@@ -1500,6 +1779,18 @@ void IntroCinematic::animatePnj( Pnj &pnj, const Playing &playing, const Cinemat
             locals = current;
         }
     }
+}
+
+void IntroCinematic::animatePnj( Pnj &pnj, const Playing &playing, const CinematicScene &scene,
+                                 const CinematicScene::Object &object, float sceneTime ) {
+    // .sce actor: Position / Heading (actor root) and the Animation track
+    // (avatar_spec 4.1): key k = last T_k <= t, clip time u = f2 - f7 +
+    // (t - T_k), linear crossfade with the previous key during f7 seconds;
+    // the clips loop. The clip reference is replaced by the style anim of
+    // the avatar (additionalsStyleAnims "m" / "w").
+    const EdenSkeleton &skeleton = pnj.Avatar->getSkeleton();
+    std::vector<BoneTransform> locals;
+    sampleActorAnimation( playing, scene, object, sceneTime, skeleton, pnj.Avatar->isWoman(), locals );
     // ActorWorld = S * R(q*) * T(pos) * Origin.
     pnj.World = sceneOrigin * scene.getOrigin() * Matrix4x4f::Translation( object.samplePosition( sceneTime ) ) *
                 EdenRotationFromQuaternion( object.sampleRotation( sceneTime ) );

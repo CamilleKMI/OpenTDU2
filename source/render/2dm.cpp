@@ -5,6 +5,7 @@ namespace {
 constexpr uint32_t k2DMMagic = MakeFourCC( '.', '2', 'D', 'M' );
 constexpr uint32_t kMaterialMagic = MakeFourCC( 'M', 'A', 'T', '.' );
 constexpr uint32_t kUVAnimationMagic = MakeFourCC( 'U', 'V', 'A', '.' );
+constexpr uint32_t kMaterialParameterMagic = MakeFourCC( 'M', 'T', 'P', '.' );
 
 constexpr uint32_t kRenderStatesOffset = 0x30;
 constexpr uint32_t kTextureSlotsOffset = 0x100;
@@ -22,7 +23,9 @@ bool IsParameterDesc( const uint8_t *p ) {
     const uint16_t type = ReadAt<uint16_t>( p, 8 );
     const uint32_t size = ReadAt<uint32_t>( p, 12 );
     const uint64_t name = ReadAt<uint64_t>( p, 0 );
-    return name != 0 && type >= 1 && type <= 4 && size == 0x10;
+    // size 0x10 (float4) or 0x40 (float4x4: TD_Impostor sym 8, 48 library
+    // materials) [DATA: the values end exactly at the MAT. section end].
+    return name != 0 && type >= 1 && type <= 4 && ( size == 0x10 || size == 0x40 );
 }
 } // namespace
 
@@ -43,6 +46,27 @@ bool MaterialDesc::getParameter( const char *pName, Vector4f &outValue ) const {
     }
     outValue = it->second;
     return true;
+}
+
+uint64_t Render2DM::ResolveSlotUVAnimation( const uint8_t *pFile, uint32_t fileSize, uint32_t mtpOffset ) {
+    // MTP. payload { u32 1; ...; +0x14 u32 UVA. payload offset } -> UVA.
+    // payload { u64 id } (see MaterialTextureSlot::UVAnimationId).
+    auto sectionAt = [&]( uint32_t payloadOffset, uint32_t magic, uint32_t minPayload ) {
+        if ( payloadOffset < sizeof( RenderFile::Header ) + sizeof( RenderFile::Section ) ||
+             payloadOffset + minPayload > fileSize ) {
+            return false;
+        }
+        return ReadAt<uint32_t>( pFile, payloadOffset - sizeof( RenderFile::Section ) ) == magic;
+    };
+    if ( mtpOffset == 0 || !sectionAt( mtpOffset, kMaterialParameterMagic, 0x18 ) ||
+         ReadAt<uint32_t>( pFile, mtpOffset ) != 1 ) {
+        return 0;
+    }
+    const uint32_t uvaOffset = ReadAt<uint32_t>( pFile, mtpOffset + 0x14 );
+    if ( !sectionAt( uvaOffset, kUVAnimationMagic, 8 ) ) {
+        return 0;
+    }
+    return ReadAt<uint64_t>( pFile, uvaOffset );
 }
 
 void Render2DM::parseMaterial( const uint8_t *pPayload, uint32_t payloadSize ) {
@@ -85,6 +109,7 @@ void Render2DM::parseMaterial( const uint8_t *pPayload, uint32_t payloadSize ) {
         slot.TextureHashcode = ReadAt<uint64_t>( pSlot, 8 );
         slot.AddressU = pSlot[0x18];
         slot.AddressV = pSlot[0x19];
+        slot.UVAnimationId = ResolveSlotUVAnimation( pParseFile, parseFileSize, ReadAt<uint32_t>( pSlot, 0x1c ) );
         if ( i < numSlots ) {
             material.AllTextures.push_back( slot );
         }
@@ -100,15 +125,19 @@ void Render2DM::parseMaterial( const uint8_t *pPayload, uint32_t payloadSize ) {
         offset += 16;
     }
     std::vector<uint64_t> parameterNames;
+    std::vector<uint32_t> parameterSizes;
     while ( offset + 16 <= payloadSize && IsParameterDesc( pPayload + offset ) ) {
         parameterNames.push_back( ReadAt<uint64_t>( pPayload, offset ) );
+        parameterSizes.push_back( ReadAt<uint32_t>( pPayload, offset + 12 ) );
         offset += 16;
     }
+    // Values packed by their descriptor size (a float4x4 takes 0x40 bytes;
+    // only its first row is kept here).
     for ( size_t i = 0; i < parameterNames.size() && offset + 16 <= payloadSize; i++ ) {
         Vector4f value( ReadAt<float>( pPayload, offset ), ReadAt<float>( pPayload, offset + 4 ),
                         ReadAt<float>( pPayload, offset + 8 ), ReadAt<float>( pPayload, offset + 12 ) );
         material.Parameters[parameterNames[i]] = value;
-        offset += 16;
+        offset += parameterSizes[i];
     }
 
     orderedMaterials.push_back( material );
@@ -122,6 +151,8 @@ bool Render2DM::parse( const uint8_t *pFile, uint32_t fileSize ) {
     if ( !RenderFile::IsValid( pFile, fileSize, k2DMMagic ) ) {
         return false;
     }
+    pParseFile = pFile;
+    parseFileSize = fileSize;
     RenderFile::VisitSections( pFile, fileSize, [&]( const RenderFile::Section &section,
                                                      uint32_t offset, uint32_t ) {
         if ( section.Type == kMaterialMagic ) {
@@ -135,6 +166,8 @@ bool Render2DM::parse( const uint8_t *pFile, uint32_t fileSize ) {
         }
         return true;
     } );
+    pParseFile = nullptr;
+    parseFileSize = 0;
     return true;
 }
 

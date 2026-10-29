@@ -4,10 +4,14 @@
 #include "core/xmb.h"
 #include "database/gs_database.h"
 #include "filesystem/gs_file.h"
+#include "render/2dm.h"
 #include "render/gs_render.h"
 #include "render/eden/eden_weather.h"
 #include "render/eden/eden_scene_view.h"
 #include "system/cmd_line.h"
+
+#include <cstring>
+#include <unordered_map>
 
 namespace {
 // 8 byte scene node name (character i added into byte i & 7, little endian):
@@ -62,7 +66,8 @@ void CinematicCar::unload() {
     rim.destroy();
     rimRear.destroy();
     tire.destroy();
-    for ( Bank *pBank : { &carBank, &carCommonBank, &rimBank, &rimRearBank, &interiorBank } ) {
+    beam.destroy();
+    for ( Bank *pBank : { &carBank, &carCommonBank, &rimBank, &rimRearBank, &interiorBank, &fxBank } ) {
         if ( !pBank->getEntries().empty() ) {
             gpRender->getTextureCache().releaseOwner( pBank->getPath().c_str() );
         }
@@ -79,6 +84,11 @@ void CinematicCar::unload() {
         door = DoorNodes();
     }
     doorAngle[0] = doorAngle[1] = 0.0f;
+    for ( int32_t side = 0; side < 2; side++ ) {
+        windows[side] = WindowNodes();
+        windowLowering[side] = 0.0f;
+    }
+    bHardtopNode = false;
 }
 
 void CinematicCar::assignEnvironment( EdenRenderer &, GPUTexture *pCube, bool bDynamic ) {
@@ -217,6 +227,8 @@ bool CinematicCar::load( const Desc &requested ) {
             car.setNodeVisible( item.NodeIndex, false );
         }
     }
+    collectLights();
+    loadBeams();
     // Cockpit (FUN_00c66380): COCK_LR and the door panels INT_LR_L / R
     // (children of DOOR_L / R) at LOD 2 / 3; at LOD 4 the interior bank
     // instances (FUN_00c69e30): COCK_HR (its seat belts BELT_L / R only
@@ -279,6 +291,24 @@ bool CinematicCar::load( const Desc &requested ) {
     // given back at the first freeride (FUN_00b10da0 step 3).
     bHardtop = false;
     hardtopSkin.clear();
+    // Side windows (FUN_00c6a610): WND_L1 / WND_L2 under DOOR_L, WND_R1 /
+    // WND_R2 under DOOR_R (names compared as 'WND_' + "L1" / "L2" / "R1" /
+    // "R2"), poses decomposed by FUN_009544e0 into car +0xa6b0.. (left) /
+    // +0xa720.. (right); none for the car id 999 [CODE]. Rest = window up.
+    // HARDTOP: the detachable roof node (slot 39, car +0x15b0).
+    bHardtopNode = scene.findNode( "HARDTOP" ) >= 0;
+    for ( int32_t side = 0; side < 2; side++ ) {
+        WindowNodes &window = windows[side];
+        window = WindowNodes();
+        windowLowering[side] = 0.0f;
+        const int32_t up = scene.findNode( side == 0 ? "WND_L1" : "WND_R1" );
+        const int32_t down = scene.findNode( side == 0 ? "WND_L2" : "WND_R2" );
+        if ( up >= 0 && down >= 0 ) {
+            window.Window = up;
+            window.Up = car.getNodeTransform( up );
+            window.Down = car.getNodeTransform( down );
+        }
+    }
     const BankEntry *pSkeleton = carBank.findEntry( ( carName + ".xsb" ).c_str() );
     if ( pSkeleton == nullptr ) {
         const std::vector<const BankEntry *> skeletons = carBank.findEntriesByExtension( "xsb" );
@@ -303,13 +333,9 @@ bool CinematicCar::load( const Desc &requested ) {
         hardtopSkeleton.computeSkinMatrices( locals, boneWorld, hardtopSkin );
         bHardtop = true;
         if ( hardtopTime > 0.0f ) {
-            for ( const char *pSide : { "L", "R" } ) {
-                const int32_t window = scene.findNode( ( std::string( "WND_" ) + pSide + "1" ).c_str() );
-                const int32_t lowered = scene.findNode( ( std::string( "WND_" ) + pSide + "2" ).c_str() );
-                if ( window >= 0 && lowered >= 0 ) {
-                    car.setNodeTransform( window, car.getNodeTransform( lowered ) );
-                }
-            }
+            // FUN_00c66150 / FUN_00c66110(1.0): windows down (WND_x1 on WND_x2).
+            setWindowLowering( 0, 1.0f );
+            setWindowLowering( 1, 1.0f );
         }
         OTDU_LOG_INFO( "CinematicCar: '%s' _car_body %d, hardtop %s (Hardtop.anm t = %.2f / %.2f)\n",
                        desc.FileName.c_str(), carBody, hardtopTime > 0.0f ? "open" : "closed", hardtopTime,
@@ -491,6 +517,159 @@ void CinematicCar::setDoorAngle( int32_t side, float angle ) {
     for ( const auto &rest : door.InteriorRest ) {
         interior.setNodeTransform( rest.first, delta * rest.second );
     }
+    // The window of the door follows it at its current lowering.
+    applyWindow( side & 1 );
+}
+
+void CinematicCar::setHardtopTime( float time ) {
+    if ( !bHardtop ) {
+        return;
+    }
+    time = Clamp( time, 0.0f, hardtopAnimation.getDuration() );
+    if ( time == hardtopTime && !hardtopSkin.empty() ) {
+        return;
+    }
+    // FUN_00c4a390: the clip sampled at t into the HANIM_S palette (car
+    // +0xae50) when t changed [CODE].
+    hardtopTime = time;
+    std::vector<BoneTransform> locals( hardtopSkeleton.getNumBones() );
+    for ( uint32_t bone = 0; bone < hardtopSkeleton.getNumBones(); bone++ ) {
+        locals[bone] = hardtopSkeleton.getBindLocal( bone );
+    }
+    hardtopAnimation.sample( hardtopSkeleton, hardtopTime, false, locals );
+    std::vector<Matrix4x4f> boneWorld;
+    hardtopSkeleton.computeSkinMatrices( locals, boneWorld, hardtopSkin );
+}
+
+void CinematicCar::setWindowLowering( int32_t side, float value ) {
+    // FUN_00c66150 / FUN_00c66110: clamp to [0, 1] (DAT_00edf668 = 1.0),
+    // dirty flag car +0xa693 -> FUN_00c674a0 places the window [CODE].
+    windowLowering[side & 1] = Clamp( value, 0.0f, 1.0f );
+    applyWindow( side & 1 );
+}
+
+void CinematicCar::applyWindow( int32_t side ) {
+    const WindowNodes &window = windows[side];
+    if ( window.Window < 0 ) {
+        return;
+    }
+    // FUN_00c674a0: FUN_00451560(key poses, value) [ENC] between WND_x1 (0)
+    // and WND_x2 (1): taken as a linear blend of the two poses [INF] (exact
+    // for a pure translation; the California WND_L2 is 0.39 m lower than
+    // WND_L1 and tilted by ~16 degrees about Z [DATA], docs/re/accessories_spec.md 5).
+    const float f = windowLowering[side];
+    Matrix4x4f pose = window.Up;
+    for ( int32_t row = 0; row < 4; row++ ) {
+        for ( int32_t column = 0; column < 4; column++ ) {
+            pose.m[row][column] = window.Up.m[row][column] + ( window.Down.m[row][column] - window.Up.m[row][column] ) * f;
+        }
+    }
+    // Window nodes live under DOOR_x: the door rotation applies on top.
+    const DoorNodes &door = doors[side];
+    if ( door.Door >= 0 && doorAngle[side] != 0.0f && car.getScene().isDescendantOf( window.Window, door.Door ) ) {
+        const Matrix4x4f rotation = Matrix4x4f::FromQuaternion(
+            Quaternionf::FromAxisAngle( Vector3f( 0.0f, 1.0f, 0.0f ), doorAngle[side] ) );
+        pose = door.DoorRest * rotation * door.DoorRest.inverse() * pose;
+    }
+    car.setNodeTransform( window.Window, pose );
+}
+
+bool CinematicCar::FindDatabaseDesc( int32_t idCar, uint64_t rimsHashcode, Desc &outDesc ) {
+    if ( gpDatabase == nullptr ) {
+        return false;
+    }
+    XmbValue root = gpDatabase->getDocument().getRoot();
+    bool bFound = false;
+    for ( uint32_t i = 0; i < root.getArraySize( "DBCarPhysicsData" ) && !bFound; i++ ) {
+        XmbValue car = root.getArrayElement( "DBCarPhysicsData", i );
+        if ( car["_id_car"].asInt( -2 ) == idCar ) {
+            outDesc.FileName = car["_car_file_name"].asString();
+            if ( rimsHashcode == 0 ) {
+                rimsHashcode = car["_default_rims"].asUInt64();
+            }
+            bFound = true;
+        }
+    }
+    if ( !bFound ) {
+        return false;
+    }
+    for ( uint32_t i = 0; i < root.getArraySize( "DBRims" ); i++ ) {
+        XmbValue rim = root.getArrayElement( "DBRims", i );
+        if ( rim["_hashcode"].asUInt64() != rimsHashcode ) {
+            continue;
+        }
+        const std::string path = ToLower( rim["_rsc_path"].asString() );
+        outDesc.RimFront = path + "/" + ToLower( rim["_rsc_file_name_front"].asString() );
+        outDesc.RimRear = path + "/" + ToLower( rim["_rsc_file_name_rear"].asString() );
+        outDesc.DiameterFront = static_cast<int32_t>( rim["_diameter_front"].asInt( 18 ) );
+        outDesc.DiameterRear = static_cast<int32_t>( rim["_diameter_rear"].asInt( 18 ) );
+        outDesc.TireRadius = outDesc.DiameterFront * 0.0254f * 0.5f +
+                             rim["_largeur_front"].asFloat( 245.0f ) * rim["_hauteur_front"].asFloat( 40.0f ) * 1e-5f;
+        return true;
+    }
+    return true;
+}
+
+bool CinematicCar::applyColor( const std::string &colorId ) {
+    if ( colorId.empty() || colorId == "##" || !car.isLoaded() ) {
+        return false;
+    }
+    const BankEntry *pLibrary = nullptr;
+    for ( const BankEntry *pEntry : carBank.findEntriesByExtension( "2dm" ) ) {
+        std::string name = ToLower( pEntry->Name );
+        const size_t dot = name.rfind( '.' );
+        if ( dot != std::string::npos ) {
+            name = name.substr( 0, dot );
+        }
+        if ( name.size() > 6 && name.compare( name.size() - 6, 6, "_color" ) == 0 ) {
+            pLibrary = pEntry;
+        }
+    }
+    Render2DM colors;
+    if ( pLibrary == nullptr || !colors.parse( pLibrary->pData, pLibrary->Size ) ) {
+        OTDU_LOG_WARN( "CinematicCar: %s: no colour library (%s)\n", fileName.c_str(),
+                       pLibrary != nullptr ? pLibrary->Name.c_str() : "none" );
+        return false;
+    }
+    const MaterialDesc *pColor = colors.find( GetIdentifier64bit( colorId.c_str() ) );
+    if ( pColor == nullptr ) {
+        OTDU_LOG_WARN( "CinematicCar: %s: colour %s not in %s (%zu materials)\n", fileName.c_str(), colorId.c_str(),
+                       pLibrary->Name.c_str(), colors.getMaterials().size() );
+        return false;
+    }
+    static const char *const kPaintParameters[] = { "MATPARAM",  "SPECPARM",  "SPECBLINN", "FLAKEABNS",
+                                                    "RAMPPOW",   "RAMPCLR1",  "RAMPCLR2",  "RAMPCLR3",
+                                                    "RAMPFLAKE", "BLINNCLRA", "BLINNCLRB" };
+    static const char *const kLowParameters[] = { "RAMPCLR1", "RAMPCLR2" };
+    bool bApplied = false;
+    for ( EdenMaterial &material : car.getMaterials() ) {
+        if ( StringCmpI( material.Name.c_str(), "Paint" ) == 0 ) {
+            for ( const char *pName : kPaintParameters ) {
+                auto it = pColor->Parameters.find( GetIdentifier64bit( pName ) );
+                if ( it != pColor->Parameters.end() ) {
+                    material.Parameters[it->first] = it->second;
+                }
+            }
+            material.Diffuse = pColor->DiffuseColor;
+            material.Ambient = pColor->AmbientColor;
+            material.Specular = pColor->SpecularColor;
+            bApplied = true;
+        } else if ( StringCmpI( material.Name.c_str(), "Paint_LR" ) == 0 ) {
+            for ( const char *pName : kLowParameters ) {
+                auto it = pColor->Parameters.find( GetIdentifier64bit( pName ) );
+                if ( it != pColor->Parameters.end() ) {
+                    material.Parameters[it->first] = it->second;
+                }
+            }
+            auto it = pColor->Parameters.find( GetIdentifier64bit( "RAMPPOW" ) );
+            auto target = material.Parameters.find( GetIdentifier64bit( "RAMPPOW" ) );
+            if ( it != pColor->Parameters.end() && target != material.Parameters.end() ) {
+                target->second.x = it->second.x;
+                target->second.y = it->second.y;
+            }
+        }
+    }
+    return bApplied;
 }
 
 int32_t CinematicCar::getIdCar() const {
@@ -676,6 +855,7 @@ void CinematicCar::draw( EdenRenderer &renderer, const Matrix4x4f &world, const 
     for ( int32_t node : cockpitLowNodes ) {
         car.setNodeVisible( node, !bInterior );
     }
+    applyLights( pWeather );
     if ( bHardtop ) {
         car.drawSkinned( renderer, world, hardtopSkin );
     } else {
@@ -684,6 +864,7 @@ void CinematicCar::draw( EdenRenderer &renderer, const Matrix4x4f &world, const 
     if ( bInterior ) {
         interior.draw( renderer, world );
     }
+    drawBeams( renderer, world, pWeather );
     for ( int32_t node : wheelNodes ) {
         // D_RIM_xx: rim size (scale) and side (right wheels turned by 180
         // degrees); the next node (?_TIRE_xx) places the tire.
@@ -713,3 +894,455 @@ void CinematicCar::draw( EdenRenderer &renderer, const Matrix4x4f &world, const 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Car lights (docs/re/car_lights_spec.md).
+
+namespace {
+// Light material names (table 0x00f7e700, 9 x 8 bytes, compared with the
+// material name hashcodes by FUN_00c5ee20): group k -> the vector at car
+// +0x783c + k * 0xc of (material, GLOSSFCT) pairs [CODE + DATA].
+struct LightMaterialName {
+    uint64_t Hashcode;
+    bool bLeft;
+    bool bFront;
+};
+constexpr uint64_t Bytes8( const char ( &s )[9] ) {
+    uint64_t v = 0;
+    for ( int i = 7; i >= 0; i-- ) {
+        v = ( v << 8 ) | static_cast<uint8_t>( s[i] );
+    }
+    return v;
+}
+// Side / front from the names (L / R = left / right, F = front) [INF];
+// LGT_R_S (group 6) taken as a right rear lamp [INF].
+const LightMaterialName kLightMaterials[9] = {
+    { Bytes8( "LGT_FL\0\0" ), true, true },     { Bytes8( "LGT_RL\0\0" ), true, false },
+    { Bytes8( "\x97GT_RL_S" ), true, false },   { Bytes8( "LGT_FR\0\0" ), false, true },
+    { Bytes8( "LGT_RR\0\0" ), false, false },   { Bytes8( "\x97GT_RR_S" ), false, false },
+    { Bytes8( "LGT_R_S\0" ), false, false },    { Bytes8( "LGT_L\0\0\0" ), true, false },
+    { Bytes8( "LGT_R\0\0\0" ), false, false },
+};
+} // namespace
+
+void CinematicCar::collectLights() {
+    lightMaterials.clear();
+    causticNodes.clear();
+    flareNodes.clear();
+    for ( int32_t i = 0; i < 3; i++ ) {
+        lightBoxNodes[i] = -1;
+        lightBoxMaterials[i].clear();
+    }
+    if ( !car.isLoaded() ) {
+        return;
+    }
+    std::vector<EdenMaterial> &materials = car.getMaterials();
+    static const uint64_t kGlossFct = GetIdentifier64bit( "GLOSSFCT" );
+    for ( uint32_t m = 0; m < materials.size(); m++ ) {
+        const uint64_t hashcode = GetIdentifier64bit( materials[m].Name.c_str() );
+        for ( const LightMaterialName &entry : kLightMaterials ) {
+            if ( entry.Hashcode == hashcode && materials[m].Parameters.count( kGlossFct ) != 0 ) {
+                lightMaterials.push_back( { m, entry.bLeft, entry.bFront } );
+            }
+        }
+    }
+    const Render3DD &scene = car.getScene();
+    const std::vector<SceneNode> &nodes = scene.getNodes();
+    // Lamp nodes (FUN_00c5f060, once for all cars: hashcodes of
+    // "Fa_%c_FL" / "Fa_%c_FR" / "Fa_%c_RL" / "Fa_%c_RR" and the same with
+    // "%d" = 1..5, for %c in "LBSWR" (string 0x00ef5fb8), each also with "_C"
+    // appended; then per car the nodes of those names: car +0x1f84 /
+    // +0x1ffc / +0x2074 / +0x20ec (RL, RR, FL, FR, flare sprites) and
+    // +0x232c / +0x23a4 / +0x241c / +0x2494 (the "_C" glow meshes) [CODE]).
+    // The California only has the "_C" nodes [DATA]: flare sprites
+    // FA_<c>_<pos>[n] (TD_Sprite FRL_<x> materials) exist on 6 of the 133
+    // car banks (ac_427, charger_srt8_police, desmosedici, diavel, fatboy,
+    // viper_srt10_police).
+    static const char *const kPositions[4] = { "FL", "FR", "RL", "RR" };
+    std::unordered_map<uint64_t, LightNode> lampNames;
+    for ( const char *pType = "LBSWR"; *pType != '\0'; pType++ ) {
+        for ( int32_t p = 0; p < 4; p++ ) {
+            for ( int32_t n = 0; n < 6; n++ ) {
+                char name[32];
+                if ( n == 0 ) {
+                    snprintf( name, sizeof( name ), "Fa_%c_%s", *pType, kPositions[p] );
+                } else {
+                    snprintf( name, sizeof( name ), "Fa_%c_%s%d", *pType, kPositions[p], n );
+                }
+                LightNode light;
+                light.Function = *pType;
+                light.bLeft = kPositions[p][1] == 'L';
+                light.bFront = kPositions[p][0] == 'F';
+                light.bFlare = true;
+                lampNames[GetIdentifier64bit( name )] = light;
+                strncat( name, "_C", sizeof( name ) - strlen( name ) - 1 );
+                light.bFlare = false;
+                lampNames[GetIdentifier64bit( name )] = light;
+            }
+        }
+    }
+    for ( size_t i = 0; i < nodes.size(); i++ ) {
+        const std::string &name = nodes[i].Name;
+        auto lamp = lampNames.find( nodes[i].Hashcode );
+        if ( lamp != lampNames.end() ) {
+            LightNode light = lamp->second;
+            light.Node = static_cast<int32_t>( i );
+            ( light.bFlare ? flareNodes : causticNodes ).push_back( light );
+        }
+        // Car node slots 13 BREAKING, 14 REVERSING, 15 HEADLIGHT (names
+        // 0x00edef08) [CODE + DATA].
+        const int32_t box = name.find( "BREAKI" ) != std::string::npos  ? 0
+                            : name.find( "EVERS" ) != std::string::npos ? 1
+                            : name.find( "EADLI" ) != std::string::npos ? 2
+                                                                         : -1;
+        if ( box >= 0 && nodes[i].Parent == 0 ) {
+            lightBoxNodes[box] = static_cast<int32_t>( i );
+        }
+    }
+    static const uint64_t kIntensity = GetIdentifier64bit( "INTENSITY" );
+    for ( const EdenModel::Item &item : car.getItems() ) {
+        for ( int32_t box = 0; box < 3; box++ ) {
+            if ( item.NodeIndex == lightBoxNodes[box] && materials[item.MaterialIndex].Parameters.count( kIntensity ) != 0 ) {
+                lightBoxMaterials[box].push_back( item.MaterialIndex );
+            }
+        }
+    }
+    OTDU_LOG_INFO( "CinematicCar: %zu light materials, %zu lamp glow nodes, %zu flare nodes, light boxes %d %d %d\n",
+                   lightMaterials.size(), causticNodes.size(), flareNodes.size(), lightBoxNodes[0], lightBoxNodes[1],
+                   lightBoxNodes[2] );
+}
+
+void CinematicCar::updateLights( float dt ) {
+    // Test switch: -indicator left|right|hazard overrides the state.
+    static const char *pForced = CmdLine::GetArgValue( "-indicator" );
+    if ( pForced != nullptr ) {
+        indicator = StringCmpI( pForced, "left" ) == 0    ? eIndicator::Left
+                    : StringCmpI( pForced, "right" ) == 0 ? eIndicator::Right
+                    : StringCmpI( pForced, "hazard" ) == 0 ? eIndicator::Hazard
+                                                           : eIndicator::Off;
+    }
+    static const int32_t forcedLights = CmdLine::GetArgInt( "-carlights", -2 );
+    if ( forcedLights >= -1 ) {
+        headlightMode = forcedLights;
+    }
+    const int32_t mode = headlightMode < 0 ? 1 : headlightMode;
+    const bool bLeft = indicator == eIndicator::Left || indicator == eIndicator::Hazard;
+    const bool bRight = indicator == eIndicator::Right || indicator == eIndicator::Hazard;
+    // FUN_00c57ef0(dt, value), value = 1 (0 in light mode 0) [CODE]:
+    // timer +0x1f10 = -1 while no blinker; 0 when one starts; then
+    // t = fmod(t + dt, 1.0) (0xe2dc12, period QWORD 0x00f44c70 = 1.0), the
+    // lamps lit while t < 0.6 (0x00ef2754); left / right value kept only for
+    // the active side(s) (+0x1db / +0x1dc).
+    const float value = mode == 0 ? 0.0f : 1.0f;
+    if ( indicatorTimer < 0.0f ) {
+        if ( bLeft || bRight ) {
+            indicatorTimer = 0.0f;
+        }
+    } else if ( !bLeft && !bRight ) {
+        indicatorTimer = -1.0f;
+    }
+    float left = value, right = value;
+    if ( indicatorTimer < 0.0f ) {
+        left = right = 0.0f;
+    } else {
+        indicatorTimer = std::fmod( indicatorTimer + dt, 1.0f );
+        if ( indicatorTimer >= 0.6f ) {
+            left = right = 0.0f;
+        }
+        if ( !bLeft ) {
+            left = 0.0f;
+        }
+        if ( !bRight ) {
+            right = 0.0f;
+        }
+    }
+    indicatorValue[0] = left;
+    indicatorValue[1] = right;
+    bIndicatorLamp = left > 0.0f || right > 0.0f;
+    // High beam (mode 2): timer +0x1f24 += dt, the position light function
+    // gets the flare value after 0.2 s (0x00f49b58); reset in mode 1 [CODE].
+    if ( mode == 1 ) {
+        highBeamTimer = 0.0f;
+    } else {
+        highBeamTimer += dt;
+    }
+}
+
+void CinematicCar::setTunnelDistance( float distance, float dt ) {
+    // FUN_00c62a70 [CODE]: car +0x2acc = distance to the nearest tunnel end
+    // (FUN_00c41d20, 0 outside tunnels or when the camera is 100 m or more
+    // from the car), +0x2ad4 = clamp((d - 10) / 10, 0, 1) (QWORD 0x00f49820
+    // = 10.0), +0x2ad0 = k x +0x2ad0 + (1 - k) x +0x2ad4 with k =
+    // exp(log(0.3) x dt / (1 / 30)) (0x00f4a178 = 0.3, 0x00f4a270 =
+    // 0.0333; 0xe2dc0c log, 0xe2db8a exp). The light values use the tunnel_
+    // weather keys when +0x2acc >= 5 (0x00edf65c, FUN_00c573c0...); +0x2ad0
+    // blends the car lighting toward tunnel_light_* (FUN_00c4df00).
+    tunnelDistance = distance;
+    float target = ( distance - 10.0f ) / 10.0f;
+    target = std::min( std::max( target, 0.0f ), 1.0f );
+    const float k = std::exp( std::log( 0.3f ) * dt / 0.033333335f );
+    tunnelBlend = k * tunnelBlend + ( 1.0f - k ) * target;
+    static const int32_t forcedTunnel = CmdLine::GetArgInt( "-tunnel", -1 );
+    bInTunnel = forcedTunnel >= 0 ? forcedTunnel != 0 : distance >= 5.0f;
+}
+
+void CinematicCar::applyLights( const WeatherPreset *pWeather ) {
+    auto weather = [pWeather, this]( const char *pName ) {
+        // FUN_00c4e710: the car_* values, tunnel_car_* when car +0x2acc >= 5.
+        if ( pWeather == nullptr ) {
+            return 0.0f;
+        }
+        return pWeather->getFloat( ( std::string( bInTunnel ? "tunnel_" : "" ) + pName ).c_str(), 0.0f );
+    };
+    const int32_t mode = headlightMode < 0 ? 1 : headlightMode;
+    // FUN_00c588d0 [CODE]: flare = car_headlight_flare_intensity (0 when
+    // < 0.05); headlight function (table +0x60): mode 2 flare + 1, mode 1
+    // flare, mode 0 0; position function (+0x68): car_poslight_intensity
+    // (0 when < 0.05), the raw flare in mode 2 after 0.2 s, 0 in mode 0;
+    // brake (+0x00) = +0x1d0, reverse (+0x38) = +0x1d1 (FUN_00c63a30).
+    const float rawFlare = weather( "car_headlight_flare_intensity" );
+    const float flare = rawFlare < 0.05f ? 0.0f : rawFlare;
+    const float poslight = weather( "car_poslight_intensity" );
+    float headlightValue = mode == 2 ? flare + 1.0f : mode == 1 ? flare : 0.0f;
+    float positionValue = poslight < 0.05f ? 0.0f : poslight;
+    if ( mode == 2 && highBeamTimer > 0.2f ) {
+        positionValue = rawFlare;
+    }
+    if ( mode == 0 ) {
+        headlightValue = positionValue = 0.0f;
+    }
+    // Headlight slot (FUN_00921260 / FUN_00923230 [CODE]): +0x10 =
+    // car_headlights_intensity (tunnel_ variant, FUN_00c57450), used clamped
+    // to [0, 1] and squared; lamps lit = the headlight function.
+    beamHeadlightIntensity = mode == 0 ? 0.0f : weather( "car_headlights_intensity" );
+    bBeamLampsOn = headlightValue > 0.0f;
+    const float brakeValue = bBraking ? 1.0f : 0.0f;
+    const float reverseValue = bReverse ? 1.0f : 0.0f;
+    // GLOSSFCT (c17 of the TD_CarPaint_NM light shaders): emissive =
+    // TEXLIGHT x dot(GLOSSLIGHT (r, g, b, 1 - a), GLOSSFCT), diffuse x
+    // prod(1 - GLOSSFCT.i x mask.i) [SHADER]. The functions that write it are
+    // encrypted (table 0x01230500, FUN_00e33810 -> 0x452c00...) [ENC]; the
+    // channels follow the TEXLIGHT colour under each GLOSSLIGHT mask
+    // (california_lgt_g / lgt_on: r red, g white, b headlamp + rear ring,
+    // 1 - a amber) [DATA + INF]: x brake, y reverse, z position (front:
+    // max with the headlights), w blinker of the material side.
+    static const uint64_t kGlossFct = GetIdentifier64bit( "GLOSSFCT" );
+    std::vector<EdenMaterial> &materials = car.getMaterials();
+    for ( const LightMaterial &light : lightMaterials ) {
+        auto it = materials[light.Material].Parameters.find( kGlossFct );
+        if ( it == materials[light.Material].Parameters.end() ) {
+            continue;
+        }
+        it->second = Vector4f( light.bFront ? 0.0f : brakeValue, light.bFront ? 0.0f : reverseValue,
+                               light.bFront ? std::max( positionValue, headlightValue ) : positionValue,
+                               indicatorValue[light.bLeft ? 0 : 1] );
+    }
+    // Lamp glow meshes "Fa_<c>_<pos>_C" (additive TD_CarPaint ps3) and flare
+    // sprites "Fa_<c>_<pos>[n]" (TD_Sprite): shown with their function
+    // [INF: the node flags (4 = hidden) are written by the encrypted table
+    // functions; the letters of "LBSWR" are read as L front lights
+    // (headlights), B back (rear position) lights, S stop, W warning
+    // (blinker of the node side), R reverse, from the node positions and the
+    // flare colours (FA_W orange, FA_S red vertex colour, common_mesh.3dd)].
+    for ( const std::vector<LightNode> *pNodes : { &causticNodes, &flareNodes } ) {
+        for ( const LightNode &node : *pNodes ) {
+            float value = 0.0f;
+            switch ( node.Function ) {
+            case 'L': value = headlightValue; break;
+            case 'B': value = positionValue; break;
+            case 'S': value = brakeValue; break;
+            case 'R': value = reverseValue; break;
+            case 'W': value = indicatorValue[node.bLeft ? 0 : 1]; break;
+            default: break;
+            }
+            static const bool bNoFlares = CmdLine::HasArg( "-noflares" );
+            car.setNodeVisible( node.Node, value > 0.0f && !( node.bFlare && bNoFlares ) );
+        }
+    }
+    // Projected light boxes (TD_ShadowBox ps1, additive: base texture x
+    // Intensity). FUN_00c63a30 / FUN_00c638d0 [CODE]: v = car_caustics_intensity
+    // (tunnel_), 0 in mode 0, + 1 in mode 2; BREAKING (slot 13) when v > 0.05
+    // and +0x1d0, REVERSING (14) when v > 0.05 and +0x1d1, INTENSITY = v;
+    // HEADLIGHT (15) INTENSITY = v (x 0.3 for the vehicle kind 1).
+    float caustics = weather( "car_caustics_intensity" );
+    if ( mode == 0 ) {
+        caustics = 0.0f;
+    } else if ( mode == 2 ) {
+        caustics += 1.0f;
+    }
+    static const bool bNoLightBoxes = CmdLine::HasArg( "-nolightboxes" );
+    const bool bBoxOn[3] = { caustics > 0.05f && bBraking, caustics > 0.05f && bReverse, caustics > 0.0f };
+    static const uint64_t kIntensity = GetIdentifier64bit( "INTENSITY" );
+    for ( int32_t box = 0; box < 3; box++ ) {
+        if ( lightBoxNodes[box] < 0 ) {
+            continue;
+        }
+        car.setNodeVisible( lightBoxNodes[box], bBoxOn[box] && !bNoLightBoxes );
+        for ( uint32_t m : lightBoxMaterials[box] ) {
+            auto it = materials[m].Parameters.find( kIntensity );
+            if ( it != materials[m].Parameters.end() ) {
+                it->second = Vector4f( caustics, 0.0f, 0.0f, 0.0f );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Light beams (docs/re/car_lights_spec.md 7).
+
+void CinematicCar::loadBeams() {
+    // FUN_00922d60 -> FUN_00964a30 x 6 per headlight slot [CODE]: the beam
+    // model (manager +0xfb20 / +0xfb24 bank ids) whose material is cloned
+    // with "_WithZ" (0x00f2d364) and gets the LightBeam_RT target in a
+    // sampler; +0x50 = its LightBeamFadeParams (0x938692998cdbdcda). The
+    // model: fx/weatherfx.bnk lightbeam_rt.3dd (node LIGHTBEAM_RT..., material
+    // LightBeam_RT_01, TD_LightBeam 693b66820e317b71, USERTYPE1/2 = the "RT"
+    // permutations: analytic cone ray march against gZpass, s3) [DATA +
+    // SHADER] [INF: the bank ids are not read; lightbeam_rt is the only car
+    // beam of the data, lightbeam_std the street lamp one].
+    if ( beam.isLoaded() || CmdLine::HasArg( "-nobeams" ) ) {
+        return;
+    }
+    EdenRenderer *pRenderer = gpRender->getEdenRenderer();
+    const std::string path = gpFile->getBankFolder() + "fx/weatherfx.bnk";
+    if ( pRenderer == nullptr || !gpFile->fileExists( path.c_str() ) || !fxBank.load( path.c_str() ) ) {
+        return;
+    }
+    gpRender->getTextureCache().loadBankTextures( fxBank, fxBank.getPath().c_str() );
+    if ( !beam.load( *pRenderer, fxBank, "lightbeam_rt", nullptr, fxBank.getPath().c_str() ) ) {
+        OTDU_LOG_WARN( "CinematicCar: lightbeam_rt not loaded\n" );
+        return;
+    }
+    for ( EdenMaterial &material : beam.getMaterials() ) {
+        // gZpass (s3) is not a .2DM slot: the screen depth (FullscreenDepth
+        // encoding, as the soft particles), point sampled.
+        if ( material.pProgram != nullptr && ( material.pProgram->PSSamplerMask & 8u ) != 0 && material.NumSlots <= 3 ) {
+            material.ScreenDepthSlot = 3;
+            material.SamplerIndex[3] = 3;
+        }
+        OTDU_LOG_INFO( "CinematicCar: beam material '%s' program %s slots %u depth slot %d\n", material.Name.c_str(),
+                       material.pProgram != nullptr ? material.pProgram->Name.c_str() : "-", material.NumSlots,
+                       material.ScreenDepthSlot );
+    }
+}
+
+void CinematicCar::drawBeams( EdenRenderer &renderer, const Matrix4x4f &world, const WeatherPreset *pWeather ) {
+    if ( !beam.isLoaded() || renderer.isShadowCasterMode() || renderer.isReflectionPass() || !bBeamLampsOn ) {
+        return;
+    }
+    // FUN_00923230 [CODE]: fade = 1 below manager +0xfaa0 = 400 m from the
+    // camera, 1 - (d - 400) / (650 - 400) beyond (+0xfaa4 = 650); I = clamp(
+    // slot +0x10, 0, 1); beam value = I x I x fade (local_1c0). FUN_00964b90:
+    // LightBeamFadeParams = (400 x 0.18, 1 / ((650 - 400) x 0.18), I x I x
+    // fade, car_lightbeam_intensity) (0x00f4b098 = 0.18; weather key
+    // 0x96e9fce2f3e5c8eb); blend SRCALPHA / ONE (0x00f90d08 / 0x00f90d0c).
+    // Beams are drawn when the manager flag +0x11 (1, ctor FUN_00921d90)
+    // and slot +0x2d8 (FUN_0042b1d0 / FUN_00c3f6d0 of the driver, [INF]
+    // taken as the player car) are set.
+    const float distance = ( world.getTranslation() - renderer.getSceneParams().CameraPosition ).length();
+    const float fade = distance < 400.0f ? 1.0f : std::max( 0.0f, 1.0f - ( distance - 400.0f ) / 250.0f );
+    const float intensity = std::min( std::max( beamHeadlightIntensity, 0.0f ), 1.0f );
+    const float value = intensity * intensity * fade;
+    const float weatherBeam = pWeather != nullptr ? pWeather->getFloat( "car_lightbeam_intensity", 0.0f ) : 0.0f;
+    static const char *pForcedBeam = CmdLine::GetArgValue( "-beamintensity" );
+    static const float forcedBeam = pForcedBeam != nullptr ? static_cast<float>( atof( pForcedBeam ) ) : -1.0f;
+    const float beamIntensity = forcedBeam >= 0.0f ? forcedBeam : weatherBeam;
+    if ( value <= 0.0f || beamIntensity <= 0.0f ) {
+        return;
+    }
+    static const uint64_t kFadeParams = GetIdentifier64bit( "LightBeamFadeParams" );
+    for ( EdenMaterial &material : beam.getMaterials() ) {
+        auto it = material.Parameters.find( kFadeParams );
+        if ( it != material.Parameters.end() ) {
+            it->second = Vector4f( 400.0f * 0.18f, 1.0f / ( 250.0f * 0.18f ), value, beamIntensity );
+        }
+        material.SrcBlend = 5; // D3DBLEND_SRCALPHA
+        material.DstBlend = 2; // D3DBLEND_ONE
+    }
+    // One beam per front lamp (slot matrices +0x50 + k x 0x40, written by the
+    // encrypted member functions of the table 0x012307f0 [ENC]) [INF: the
+    // front light nodes Fa_L_FL* / Fa_L_FR* (flare or _C glow node) give the
+    // lamp positions, the car axes the orientation; one beam per side].
+    bool bSide[2] = { false, false };
+    for ( const std::vector<LightNode> *pNodes : { &flareNodes, &causticNodes } ) {
+        for ( const LightNode &node : *pNodes ) {
+            if ( node.Function != 'L' || !node.bFront || bSide[node.bLeft ? 0 : 1] ) {
+                continue;
+            }
+            bSide[node.bLeft ? 0 : 1] = true;
+            const Vector3f lamp = car.getNodeTransform( node.Node ).getTranslation();
+            beam.draw( renderer, world * Matrix4x4f::Translation( lamp ) );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Projected headlight (docs/re/car_lights_spec.md 8).
+
+bool CinematicCar::getHeadlightSpot( const Matrix4x4f &world, const Vector3f &cameraPosition,
+                                     EdenSceneView::HeadlightSpot &outSpot ) const {
+    if ( !car.isLoaded() || !bBeamLampsOn || beamHeadlightIntensity <= 0.0f ) {
+        return false;
+    }
+    // Manager constants (ctor FUN_00921d90 [CODE]), variant 0 (the player
+    // car: slot +0x2d8 set, not a bike; 1 other cars, 2 / 3 bikes):
+    //   +0xfaf8 3.1   (height offset, slot +0x18)   +0xfb08 -1.6 (slot +0x1c = 1.6)
+    //   +0xfae8 0.4712 (tilt about X, slot +0x20)   +0xfab8 102 (far, slot +0x360)
+    //   +0xfac8 1.4835 (slot +0x364 / +0x36c)      +0xfad8 1.6057 (fov, slot +0x368)
+    static const float kHeight = 3.1f, kBack = -1.6f, kTilt = 0.47123888f;
+    static const float kFar = 102.0f, kNear = 1.4835298f, kFov = 1.6057029f;
+    // FUN_00921260: spot frame M = RotX(tilt) x T(0, 3.1 + sy / 2, -1.6 + sz / 2)
+    // x car (row vectors; sy / sz = 0.5 x the vector of the driver vfunc
+    // +0x18 [INF: read as the car size (height, length): BODY_HR bounds]).
+    Vector3f boundsMin( -1.0f, 0.0f, -2.2f ), boundsMax( 1.0f, 1.3f, 2.2f );
+    getBodyBounds( boundsMin, boundsMax );
+    const Vector3f size = boundsMax - boundsMin;
+    const Vector3f local( 0.0f, kHeight + 0.5f * size.y, kBack + 0.5f * size.z );
+    const float c = std::cos( kTilt ), s = std::sin( kTilt );
+    const Vector3f carX = world.transformVector( Vector3f( 1.0f, 0.0f, 0.0f ) ).normalized();
+    const Vector3f carY = world.transformVector( Vector3f( 0.0f, 1.0f, 0.0f ) ).normalized();
+    const Vector3f carZ = world.transformVector( Vector3f( 0.0f, 0.0f, 1.0f ) ).normalized();
+    outSpot.Position = world.transformPoint( local );
+    outSpot.AxisX = carX;
+    outSpot.AxisY = ( carY * c + carZ * s ).normalized();
+    outSpot.Direction = ( carY * -s + carZ * c ).normalized();
+    outSpot.Far = kFar;
+    outSpot.Near = kNear;
+    // FUN_00da07c0: a = f(slot +0x368 / 2), b = f(slot +0x36c / 2) with f =
+    // 0x6c8d32 [ENC; INF: cos, it is compared with a dot product].
+    outSpot.CosOuter = std::cos( 0.5f * kFov );
+    outSpot.CosInner = std::cos( 0.5f * kNear );
+    // ProjMatrix (FUN_00e27470, fov slot +0x368 x 57.3 then x 0.0174533 x
+    // 0.5) [CODE; INF: symmetric, aspect 1].
+    outSpot.TanHalfFov = std::tan( 0.5f * kFov );
+    // Spot_PositionDropOffNear.w (FUN_009227c0): m = max(sqrt(3.1^2 +
+    // 1.6^2), g(pi / 2 - tilt - fov / 2) x 3.1) (g = 0x40d470 [ENC; INF:
+    // tan]); f = 1.01 x far x (1 / far) = 1.01; w = f > m - 0.5 ? 0.5 + f /
+    // 1.01 : m. Slot +0x18 also gets + the x of the headlight matrix when
+    // the member +0x2b8 succeeds [ENC], taken as 0.
+    const float r = std::sqrt( kHeight * kHeight + kBack * kBack );
+    const float m = std::max( r, std::tan( 1.5707964f - kTilt - 0.5f * kFov ) * kHeight );
+    const float f = 1.01f;
+    outSpot.DropOffNear = f > m - 0.5f ? 0.5f + f / 1.01f : m;
+    // FUN_00923230: vars.z = I' x clamp(I, 0, 1)^2 x fade, I = slot +0x10 =
+    // car_headlights_intensity (tunnel_), I' = I (1 when high beam and I <
+    // 1), fade = 1 below 400 m (+0xfaa0), linear to 0 at 650 m (+0xfaa4);
+    // Spot_Color.x [INF: 1, not written by readable code].
+    const float distance = ( outSpot.Position - cameraPosition ).length();
+    if ( distance > 650.0f ) {
+        return false;
+    }
+    const float fade = distance < 400.0f ? 1.0f : 1.0f - ( distance - 400.0f ) / 250.0f;
+    const float clamped = std::min( std::max( beamHeadlightIntensity, 0.0f ), 1.0f );
+    const int32_t mode = headlightMode < 0 ? 1 : headlightMode;
+    float scale = beamHeadlightIntensity;
+    if ( mode == 2 && scale < 1.0f ) {
+        scale = 1.0f;
+    }
+    outSpot.Intensity = scale * clamped * clamped * fade;
+    // gProjTexture: projectivespotlighttexture (fx/weatherfx.bnk), the
+    // texture of the "No Texture" material of weatherfx/headlight/headlight.3dd
+    // [DATA], the model the manager loads by bank ids (+0xfb18 / +0xfb1c,
+    // FUN_00920660 / FUN_00920890) [CODE; INF: ids not resolved].
+    outSpot.pTexture = gpRender->getTextureCache().find( fxBank.getPath().c_str(), "projectivespotlighttexture" );
+    return outSpot.pTexture != nullptr && outSpot.Intensity > 0.0f;
+}

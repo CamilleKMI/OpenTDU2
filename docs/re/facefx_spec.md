@@ -390,8 +390,8 @@ setLookAtTarget yet), the one-frame fade of FUN_00b76070 (the registers simply s
 
 ## 7. FaceFX outside the intro / garage cinematics [DATA]
 Every `.sce` of the cinematic banks with a Morph track or an lkon message: new_intro (C_AVATAR, C_FIESTA_INTRO_01..06,
-C_INTRO, C_TESS, C_WALKMODE), garage (C_INTRO, C_VOICE_03..06, C_LIFE_TESS), meeting_tess (M_MEETING_TESS_*; bank not
-used by the current flow). All are played by `IntroCinematic`. `M_FIRST_OUTRO_first_outro.sce` (FREERIDE, eph_l3di.bnk)
+C_INTRO, C_TESS, C_WALKMODE), garage (C_INTRO, C_VOICE_03..06, C_LIFE_TESS), meeting_tess (M_MEETING_TESS_*; story step 3,
+game mode CINE, docs/re/story_spec.md 3). All are played by `IntroCinematic`. `M_FIRST_OUTRO_first_outro.sce` (FREERIDE, eph_l3di.bnk)
 has no Morph track and no look-at (its bank carries realtor-e-m/w.fxe for the other cinematics of the spot). The exe
 has no blink / idle facial system (no string, the only FaceFX drivers are the Morph track, §3.4 and §6) [CODE].
 

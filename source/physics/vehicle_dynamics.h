@@ -106,6 +106,14 @@ public:
     inline bool isOnGround() const { return bOnGround; }
     inline bool isSportLines() const { return bSportLines; }
     void setLogContacts( bool bLog ) { bLogContacts = bLog; }
+    // Largest approach speed (m/s) of a chassis contact (body hit, not the
+    // tyres) since the last call: the car collision events (the MISSION
+    // callback FUN_00a15530 registered on the player car by FUN_00c3f2a0).
+    float takeImpactSpeed() {
+        const float speed = impactSpeed;
+        impactSpeed = 0.0f;
+        return speed;
+    }
     // One line of drive train state (debug logs).
     std::string getDebugState() const;
     // Hub offset along the car up axis from its modelled place (drawing):
@@ -200,6 +208,7 @@ private:
     float blueLine = 0.0f, redLine = 0.0f;
     bool bOnGround = false;
     bool bLogContacts = false;
+    float impactSpeed = 0.0f;
 
     void tick( float h, const Input &input, const VehicleWorldCollision &collision );
     void applyControls( const Input &input, float forwardSpeed );

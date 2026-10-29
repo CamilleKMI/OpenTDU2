@@ -80,6 +80,9 @@ public:
     // Forgets the projectors and the registered materials (the models are
     // about to be destroyed).
     void clear();
+    // Forgets the projectors and the registered materials of one model (the
+    // model is about to be destroyed: streamed spot exteriors).
+    void removeModel( EdenModel &model );
 
     inline const std::vector<Projector> &getProjectors() const { return projectors; }
     // Something to draw this frame.

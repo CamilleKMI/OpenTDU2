@@ -19,6 +19,14 @@ constexpr uint32_t kGridQuads = EdenWorld::kHeightfieldSize - 1;
 // linear + mirrored repeat (eSamplerHeapIndex SH_LinearMirror).
 constexpr uint64_t kBackwashShaderSet = 0x73078865ca31234dull;
 constexpr uint16_t kSamplerLinearMirror = 4;
+// SH_LinearUV + 3 * clamp + clamp (2DM / D3DTADDRESS 3 on u and v).
+constexpr uint8_t kSamplerLinearClampUV = 5 + 3 * 2 + 2;
+// TD_Ground, TD_Ground_HM, TD_Road shader sets (ShaderSet guids, FUN_00982af0).
+constexpr uint64_t kGroundShaderSet = 0xb0f1234b0f123473ull;
+constexpr uint64_t kGroundHMShaderSet = 0xa0a0a1a1a2a2a3a3ull;
+constexpr uint64_t kRoadShaderSet = 0xc8ad93c95455291bull;
+const uint64_t kShadowSlotType = GetIdentifier64bit( "SHADOW" );
+const uint64_t kSectorOffset = GetIdentifier64bit( "SECTROFF" );
 
 std::string SectorName( const EdenWorld::SectorId &id ) {
     char name[64];
@@ -41,6 +49,9 @@ bool EdenWorld::initialize( EdenRenderer &renderer, const char *pIsland ) {
     destroy();
     pRenderer = &renderer;
     islandFolder = "Euro/Bnk/islands/" + std::string( pIsland ) + "/level/";
+    // Water plane: DAT_00fe5028 == 1 (level "Hawai", FUN_0098e450) -> -1.8,
+    // else 0 (FUN_00963010 [CODE]).
+    waterHeight = StringCmpI( pIsland, "hawai" ) == 0 ? -1.8f : 0.0f;
     if ( !loadWorldConfig( pIsland ) ) {
         // Ibiza values (its worldconfig.cpr) [DATA].
         areaColumns = 7;
@@ -94,6 +105,16 @@ bool EdenWorld::initialize( EdenRenderer &renderer, const char *pIsland ) {
                     libraryNodes.emplace( nodes[i].Hashcode, i );
                 }
             }
+            // Neon set of the library materials (the .pmi instances share
+            // them; FUN_00988d10 registers each instance model, the
+            // WeatherEmissive value is the same for all).
+            for ( EdenMaterial &material : libraryModel.getMaterials() ) {
+                if ( EdenNeons::IsNeonSetMaterial( material ) ) {
+                    sharedNeonMaterials.push_back( &material );
+                }
+            }
+            // LOD 1 / 2 objects and tree impostors (eden_world_lod.cpp).
+            loadLibraryLods( renderer, commonPath.c_str() );
         }
     } else {
         OTDU_LOG_WARN( "EdenWorld: '%s' not found\n", commonPath.c_str() );
@@ -112,6 +133,14 @@ bool EdenWorld::initialize( EdenRenderer &renderer, const char *pIsland ) {
         if ( loadHeightfield( islandBank, pIsland, islandPath.c_str(), islandTerrain ) ) {
             islandTerrain.Spacing = 384.0f;
             islandTerrain.Materials[0].HeightfieldGrid = 2;
+            // AREASIZE = (16 / NbColumns, 16 / NbRows) (FUN_0098cc90 called by
+            // FUN_0098e450 with levelObj+0xf98/+0xf9c = the worldconfig.cpr
+            // area grid, FUN_0098e060 [CODE]). The island permutation VS:
+            // colour UV = grid * AreaSize / 256 [SHADER], i.e. the colour map
+            // spans the area grid (16 quads of 384 m per area).
+            islandTerrain.Materials[0].StageConstants[0]["AreaSize"] = {
+                Vector4f( 16.0f / static_cast<float>( areaColumns ), 16.0f / static_cast<float>( areaRows ), 0.0f,
+                          0.0f ) };
             renderer.updateProgram( islandTerrain.Materials[0] );
             if ( islandTerrain.Materials[0].pProgram == nullptr ) {
                 OTDU_LOG_WARN( "EdenWorld: no island permutation of TD_HeightMap for '%s'\n", pIsland );
@@ -159,6 +188,7 @@ bool EdenWorld::initialize( EdenRenderer &renderer, const char *pIsland ) {
     } else {
         OTDU_LOG_WARN( "EdenWorld: '%s' not found (no road signs)\n", actorPath.c_str() );
     }
+    loadEffectsBank( pIsland );
     return pGridBuffer != nullptr && pGridIndices != nullptr;
 }
 
@@ -221,6 +251,11 @@ int32_t EdenWorld::getActorModel( uint64_t hashcode ) {
             auto pModel = std::make_unique<EdenModel>();
             if ( pGeometry != nullptr && pModel->load( *pRenderer, *pScene, *pGeometry, pMaterials, &libraryMaterials,
                                                        actorBank.getPath().c_str() ) ) {
+                for ( EdenMaterial &material : pModel->getMaterials() ) {
+                    if ( EdenNeons::IsNeonSetMaterial( material ) ) {
+                        sharedNeonMaterials.push_back( &material );
+                    }
+                }
                 actorModels.push_back( std::move( pModel ) );
                 index = static_cast<int32_t>( actorModels.size() - 1 );
             }
@@ -234,10 +269,19 @@ int32_t EdenWorld::getActorModel( uint64_t hashcode ) {
 }
 
 void EdenWorld::loadInstances( Sector &sector, const std::string &name ) {
-    // V (vegetation) and O (objects): static library models; A: actors.
-    // S (guard rails, skinned with a per instance bone palette) and F
-    // (empty) are not drawn yet.
-    for ( const char *pSuffix : { "-v", "-o", "-a" } ) {
+    // V (vegetation) and O (objects): static library models; A: actors;
+    // S: skinned library models (guard rails SF_GLISS / SF_GLISO, MOB type 3,
+    // payload = one skin matrix per skeleton bone, see pmi_spec.md 1.5).
+    // F (ambient effects) is read by loadEffects.
+    static const bool bNoRails = CmdLine::HasArg( "-norails" ); // comparisons: -S.pmi not loaded
+    static const bool bGroundLog = getenv( "OTDU_GROUND_LOG" ) != nullptr;
+    uint32_t groundCounts[4] = {};
+    for ( const char *pSuffix : { "-v", "-o", "-a", "-s" } ) {
+        if ( bNoRails && pSuffix[1] == 's' ) {
+            continue;
+        }
+        // FUN_00988d10 list kinds: V 0, O 1, S 2 (the A actors: 3).
+        const uint8_t listKind = pSuffix[1] == 'v' ? 0 : pSuffix[1] == 'o' ? 1 : pSuffix[1] == 's' ? 2 : 3;
         const BankEntry *pEntry = sector.SectorBank.findEntry( ( name + pSuffix ).c_str(), "pmi" );
         if ( pEntry == nullptr ) {
             continue;
@@ -274,6 +318,18 @@ void EdenWorld::loadInstances( Sector &sector, const std::string &name ) {
                 if ( !libraryModel.getNodeBounds( model, boundsMin, boundsMax ) ) {
                     continue;
                 }
+            } else if ( instance.Type == 3 ) {
+                // Guard rail: library node (one LOD, switch value 0). The S
+                // list pass FUN_00981f40 culls per cell with a maxDist2 written
+                // by FUN_004dd1c0 [ENC]: drawn over the loaded sectors [INF].
+                // The record AABB holds the skinned mesh [DATA]; FUN_00988d10
+                // sets a 25 m bounding radius (DAT_00edd53c) [CODE].
+                auto it = libraryNodes.find( instance.Hashcode );
+                if ( it == libraryNodes.end() || instance.pPayload == nullptr || instance.PayloadSize < 64 ) {
+                    continue;
+                }
+                model = it->second;
+                distance = FLT_MAX;
             } else if ( instance.Type == 2 || instance.Type == 4 ) {
                 model = getActorModel( instance.Hashcode );
                 if ( model < 0 ) {
@@ -286,12 +342,160 @@ void EdenWorld::loadInstances( Sector &sector, const std::string &name ) {
             } else {
                 continue;
             }
+            // FUN_00985e40 for the instance model (FUN_00988d10 0x98947b,
+            // FUN_00960c30 for the actors): one AnimValue state per blinking
+            // material of the model, seeded per instance.
+            if ( sector.InstanceBlinkStart.empty() ) {
+                sector.InstanceBlinkStart.push_back( 0 );
+            }
+            const uint32_t instanceIndex = static_cast<uint32_t>( sector.Instances.size() );
+            const uint32_t sectorKey = static_cast<uint32_t>( ( ( sector.Id.AreaX * 8 + sector.Id.X ) << 20 ) ^
+                                                              ( ( sector.Id.AreaY * 8 + sector.Id.Y ) << 12 ) );
+            for ( const EdenMaterial *pMaterial : getInstanceBlinkMaterials( instance.Type == 3 ? 1 : instance.Type, model ) ) {
+                EdenNeons::Blink blink;
+                blink.initialize( sectorKey ^ ( instanceIndex * 0x9e3779b1u ) ^
+                                  static_cast<uint32_t>( sector.InstanceBlinks.size() ) );
+                sector.InstanceBlinks.emplace_back( pMaterial, blink );
+            }
+            static const bool bNeonLog = getenv( "OTDU_NEON_LOG" ) != nullptr;
+            if ( bNeonLog && sector.InstanceBlinks.size() != sector.InstanceBlinkStart.back() ) {
+                OTDU_LOG_INFO( "EdenWorld: %s instance %u %016llx (%.1f %.1f %.1f): %u blinking neon materials (%s)\n",
+                               name.c_str(), instanceIndex, static_cast<unsigned long long>( instance.Hashcode ),
+                               instance.Position.x, instance.Position.y, instance.Position.z,
+                               static_cast<uint32_t>( sector.InstanceBlinks.size() - sector.InstanceBlinkStart.back() ),
+                               sector.InstanceBlinks.back().first->Name.c_str() );
+                OTDU_LOG_INFO( "    axes x (%.2f %.2f %.2f) z (%.2f %.2f %.2f) box (%.1f %.1f %.1f)-(%.1f %.1f %.1f)\n",
+                               instance.World.m[0][0], instance.World.m[0][1], instance.World.m[0][2],
+                               instance.World.m[2][0], instance.World.m[2][1], instance.World.m[2][2],
+                               instance.BoxMin.x, instance.BoxMin.y, instance.BoxMin.z, instance.BoxMax.x,
+                               instance.BoxMax.y, instance.BoxMax.z );
+            }
+            sector.InstanceBlinkStart.push_back( static_cast<uint32_t>( sector.InstanceBlinks.size() ) );
             sector.Instances.push_back( instance );
             sector.InstanceModels.push_back( model );
             sector.InstanceDistances.push_back( distance );
+            sector.InstanceLists.push_back( listKind );
+            if ( bGroundLog && ( instance.Type == 1 || instance.Type == 3 ) && libraryNodeHasGround( model ) ) {
+                groundCounts[listKind]++;
+            }
         }
     }
+    if ( bGroundLog ) {
+        OTDU_LOG_INFO( "EdenWorld: %s: instances with a TD_Ground material: V %u, O %u, S %u\n", name.c_str(),
+                       groundCounts[0], groundCounts[1], groundCounts[2] );
+    }
     OTDU_LOG_DEBUG( "EdenWorld: %s: %zu instances\n", name.c_str(), sector.Instances.size() );
+    if ( !sector.InstanceBlinks.empty() ) {
+        OTDU_LOG_DEBUG( "EdenWorld: %s: %zu blinking instance neons\n", name.c_str(), sector.InstanceBlinks.size() );
+    }
+}
+
+bool EdenWorld::libraryNodeHasGround( int32_t node ) {
+    auto it = libraryNodeGround.find( node );
+    if ( it != libraryNodeGround.end() ) {
+        return it->second;
+    }
+    bool bGround = false;
+    EdenModel *pModels[3] = { &libraryModel, &libraryLodModels[0], &libraryLodModels[1] };
+    for ( EdenModel *pModel : pModels ) {
+        const auto range = pModel->getNodeItemRange( node );
+        for ( uint32_t i = range.first; i < range.first + range.second && !bGround; i++ ) {
+            bGround = pModel->getMaterials()[pModel->getItems()[i].MaterialIndex].ShaderSetGUID == kGroundShaderSet;
+        }
+    }
+    libraryNodeGround.emplace( node, bGround );
+    return bGround;
+}
+
+const std::vector<const EdenMaterial *> &EdenWorld::getInstanceBlinkMaterials( uint8_t type, int32_t model ) {
+    auto &cache = type == 1 ? libraryNodeBlinks : actorModelBlinks;
+    auto it = cache.find( model );
+    if ( it != cache.end() ) {
+        return it->second;
+    }
+    std::vector<const EdenMaterial *> &list = cache[model];
+    auto add = [&list]( const EdenMaterial &material ) {
+        if ( EdenNeons::IsBlinkMaterial( material ) &&
+             std::find( list.begin(), list.end(), &material ) == list.end() ) {
+            list.push_back( &material );
+        }
+    };
+    if ( type == 1 ) {
+        // Materials drawn by the instanced node [INF: the model instance
+        // material list of the original is not decoded further].
+        const auto range = libraryModel.getNodeItemRange( model );
+        for ( uint32_t i = range.first; i < range.first + range.second; i++ ) {
+            add( libraryModel.getMaterials()[libraryModel.getItems()[i].MaterialIndex] );
+        }
+    } else if ( model >= 0 && model < static_cast<int32_t>( actorModels.size() ) ) {
+        for ( const EdenMaterial &material : actorModels[model]->getMaterials() ) {
+            add( material );
+        }
+    }
+    return list;
+}
+
+void EdenWorld::RegisterNeons( EdenModel &model, uint32_t key, std::vector<EdenMaterial *> &outSet,
+                               std::vector<std::pair<EdenMaterial *, EdenNeons::Blink>> &outBlinks ) {
+    if ( CmdLine::HasArg( "-noworldneons" ) ) {
+        return;
+    }
+    for ( EdenMaterial &material : model.getMaterials() ) {
+        if ( EdenNeons::IsNeonSetMaterial( material ) ) {
+            outSet.push_back( &material );
+        }
+        if ( EdenNeons::IsBlinkMaterial( material ) ) {
+            EdenNeons::Blink blink;
+            blink.initialize( key ^ static_cast<uint32_t>( outBlinks.size() * 0x9e3779b1u ) );
+            material.Parameters[EdenNeons::kAnimValue] = blink.Value;
+            outBlinks.emplace_back( &material, blink );
+        }
+    }
+}
+
+void EdenWorld::updateNeons( const WeatherPreset *pWeather, float deltaTime ) {
+    // impostor_ambient (FUN_00d769e0 -> renderer +0x45c0 [CODE]): ambient
+    // light 1 of the impostors (eden_world_lod.cpp).
+    if ( pWeather != nullptr ) {
+        impostorAmbient = pWeather->getVector3( "impostor_ambient", Vector3f( 0.0f, 0.0f, 0.0f ) );
+    }
+    static const bool bDisabled = CmdLine::HasArg( "-noworldneons" ); // comparisons: no world neon registration
+    if ( bDisabled ) {
+        return;
+    }
+    // FUN_009834d0: neon set (FUN_009829d0) then the AnimValue entries
+    // (FUN_009821a0).
+    float strength = 0.0f;
+    if ( EdenNeons::GetStrength( pWeather, strength ) ) {
+        for ( EdenMaterial *pMaterial : sharedNeonMaterials ) {
+            EdenNeons::ApplyStrength( *pMaterial, strength );
+        }
+        for ( auto &pSector : sectors ) {
+            for ( EdenMaterial *pMaterial : pSector->NeonMaterials ) {
+                EdenNeons::ApplyStrength( *pMaterial, strength );
+            }
+        }
+        for ( auto &pArea : areas ) {
+            for ( EdenMaterial *pMaterial : pArea->NeonMaterials ) {
+                EdenNeons::ApplyStrength( *pMaterial, strength );
+            }
+        }
+    }
+    for ( auto &pSector : sectors ) {
+        for ( auto &entry : pSector->NeonBlinks ) {
+            entry.second.update( deltaTime );
+            entry.first->Parameters[EdenNeons::kAnimValue] = entry.second.Value;
+        }
+        for ( auto &entry : pSector->InstanceBlinks ) {
+            entry.second.update( deltaTime );
+        }
+    }
+    for ( auto &pArea : areas ) {
+        for ( auto &entry : pArea->NeonBlinks ) {
+            entry.second.update( deltaTime );
+            entry.first->Parameters[EdenNeons::kAnimValue] = entry.second.Value;
+        }
+    }
 }
 
 void EdenWorld::drawInstances( EdenRenderer &renderer, const Sector &sector, const Vector3f &cameraPosition ) {
@@ -335,10 +539,46 @@ void EdenWorld::drawInstances( EdenRenderer &renderer, const Sector &sector, con
         if ( !bVisible ) {
             continue;
         }
-        if ( instance.Type == 1 ) {
-            libraryModel.drawNodeItems( renderer, sector.InstanceModels[i], instance.World );
+        // Per instance AnimValue (parameter block of (material, instance)).
+        static const bool bNoNeons = CmdLine::HasArg( "-noworldneons" );
+        const EdenDrawParams *pParams = nullptr;
+        EdenDrawParams params;
+        if ( !bNoNeons && i + 1 < sector.InstanceBlinkStart.size() &&
+             sector.InstanceBlinkStart[i] != sector.InstanceBlinkStart[i + 1] ) {
+            params.bDeferBlended = true;
+            for ( uint32_t b = sector.InstanceBlinkStart[i]; b < sector.InstanceBlinkStart[i + 1]; b++ ) {
+                params.MaterialVectors.push_back(
+                    { sector.InstanceBlinks[b].first, EdenNeons::kAnimValue, sector.InstanceBlinks[b].second.Value } );
+            }
+            pParams = &params;
+        }
+        // TD_Ground instances: per sector sectrOff and SHADOW = -s map (O / S).
+        const uint8_t listKind = sector.InstanceLists[i];
+        if ( ( instance.Type == 1 || instance.Type == 3 ) && listKind < 3 &&
+             libraryNodeHasGround( sector.InstanceModels[i] ) ) {
+            if ( pParams != nullptr ) {
+                const EdenDrawParams &ground = sector.GroundInstanceParams[listKind];
+                params.Vectors = ground.Vectors;
+                params.TextureOverrides = ground.TextureOverrides;
+            } else {
+                pParams = &sector.GroundInstanceParams[listKind];
+            }
+        }
+        if ( instance.Type == 3 ) {
+            // Skin matrices: D3D row major float4x4 per bone, v_world =
+            // v . Bone[i] . World (TD_Ground skinned vs: __Skin_Matrix c148
+            // then __World_View_Proj c60 [SHADER]); same storage as World.
+            Matrix4x4f bones[32];
+            const uint32_t numBones = Min<uint32_t>( instance.PayloadSize / 64u, 32u );
+            for ( uint32_t b = 0; b < numBones; b++ ) {
+                memcpy( bones[b].m, instance.pPayload + b * 64u, 64u );
+            }
+            libraryModel.drawNodeItemsSkinned( renderer, sector.InstanceModels[i], instance.World, bones, numBones,
+                                               pParams );
+        } else if ( instance.Type == 1 ) {
+            drawLibraryInstance( renderer, instance, sector.InstanceModels[i], cameraPosition, pParams );
         } else {
-            actorModels[sector.InstanceModels[i]]->draw( renderer, instance.World );
+            actorModels[sector.InstanceModels[i]]->draw( renderer, instance.World, pParams );
         }
     }
 }
@@ -360,9 +600,21 @@ void EdenWorld::destroy() {
     sectors.clear();
     areas.clear();
     failedSectors.clear();
+    fxSources.clear();
+    fxLibrary.clear();
+    fxEntities = XmbDocument();
+    fxHashcodes = BankHashcodes();
+    if ( fxBank.isLoaded() ) {
+        gpRender->getTextureCache().releaseOwner( fxBank.getPath().c_str() );
+    }
+    fxBank.unload();
+    destroyLibraryLods();
     libraryModel.destroy();
     libraryNodes.clear();
     actorModels.clear();
+    sharedNeonMaterials.clear();
+    libraryNodeBlinks.clear();
+    actorModelBlinks.clear();
     actorModelIndices.clear();
     actorScenes.clear();
     actorNames.clear();
@@ -544,10 +796,46 @@ bool EdenWorld::loadSector( const SectorId &id ) {
     const std::string name = SectorName( id );
     loadHeightfield( pSector->SectorBank, name.c_str(), path, pSector->Terrain );
     // Sector shadow map (-s.2db) on the SHADOW slot of the objects.
+    // FUN_00982af0 (end of the sector setup FUN_00986760) [CODE]: for the
+    // sector materials (+0x1a7c) of TD_Road (c8ad93c95455291b: every SHADOW
+    // slot) and TD_Ground / TD_Ground_HM (slot 2): texture = the -s map
+    // (sector resource +0x674), addressing 3 / 3 (CLAMP), and for the two
+    // TD_Ground families sectrOff = (sector x, 0, sector z, 0) (+0x30 / +0x34,
+    // minus the origin shift DAT_01367a10 that OpenTDU2 does not use). The
+    // TD_Ground vs samples the -s map at (world.xz - sectrOff.xz) / 768: with
+    // the 2DM value (0, 0, 0, 768) the lookup was off by half a sector on the
+    // odd sector rows (x origin + 384 m).
     GPUTexture *pShadowMap = gpRender->getTextureCache().find( path, ( name + "-s" ).c_str() );
+    pSector->pShadowMap = pShadowMap;
     EdenRenderer *pEdenRenderer = pRenderer;
-    auto materialSetup = [pShadowMap, pEdenRenderer]( EdenMaterial &material ) {
-        if ( pShadowMap != nullptr && pEdenRenderer->assignTexture( material, "SHADOW", pShadowMap ) ) {
+    const Vector3f sectorOrigin = pSector->Origin;
+    auto materialSetup = [pShadowMap, pEdenRenderer, sectorOrigin]( EdenMaterial &material ) {
+        if ( pShadowMap == nullptr ) {
+            return;
+        }
+        const bool bGround = material.ShaderSetGUID == kGroundShaderSet || material.ShaderSetGUID == kGroundHMShaderSet;
+        if ( !bGround && material.ShaderSetGUID != kRoadShaderSet ) {
+            if ( pEdenRenderer->assignTexture( material, "SHADOW", pShadowMap ) ) {
+                pEdenRenderer->updateProgram( material );
+            }
+            return;
+        }
+        // TD_Ground / TD_Ground_HM: slot 2 whatever its 2DM type (+0x150; it is
+        // SHADOW in the library and sector-5-0-6-7-o TD_Ground materials but
+        // 5067tunnel_mesh, whose slot 2 is DETAIL1 [DATA]).
+        bool bAssigned = false;
+        for ( uint32_t i = 0; i < material.NumSlots; i++ ) {
+            if ( bGround ? i == 2 : material.SlotTypes[i] == kShadowSlotType ) {
+                material.pTextures[i] = pShadowMap;
+                material.TextureHashes[i] = GetIdentifier64bit( pShadowMap->Name.c_str() );
+                material.SamplerIndex[i] = kSamplerLinearClampUV;
+                bAssigned = true;
+            }
+        }
+        if ( bGround ) {
+            material.Parameters[kSectorOffset] = Vector4f( sectorOrigin.x, 0.0f, sectorOrigin.z, 0.0f );
+        }
+        if ( bAssigned ) {
             pEdenRenderer->updateProgram( material );
         }
     };
@@ -581,7 +869,38 @@ bool EdenWorld::loadSector( const SectorId &id ) {
     if ( numUVAnimations != 0 && getenv( "OTDU_OCEAN_LOG" ) != nullptr ) {
         OTDU_LOG_INFO( "EdenWorld: %s: %u UV animations\n", name.c_str(), numUVAnimations );
     }
+    // FUN_00986e90: streamed world object loaded -> FUN_00985e40 for its
+    // model instance (+0xf4) [CODE]; the sector -o scene is taken as one
+    // model instance [INF].
+    RegisterNeons( pSector->Objects, static_cast<uint32_t>( GetIdentifier64bit( name.c_str() ) ),
+                   pSector->NeonMaterials, pSector->NeonBlinks );
+    // TD_Ground parameters of the O / S list instances (night_lighting_spec
+    // 2.1). FUN_00982af0 fills the override record (list +0x7670 =
+    // { TD_Ground guid, 3, slot { texture +0x24 = the -s map, addressing
+    // +0x2c / +0x2d = 2 / 2 } }, same as FUN_00987e80) of the lists +0xa010
+    // (kind 1, O) and +0x11750 (kind 2, S) and of the fourth list +0x18e90;
+    // FUN_00987ec0 / FUN_009884c0 point every library model instance with a
+    // TD_Ground material at the record of its list (+0xb8, flags |= 0x10000)
+    // and write the instance sectrOff = (sector x, 0, sector z, 768.0
+    // DAT_00f4aa88) [CODE]. The record of the V list (+0x28d0 + 0x7670) is not
+    // written by readable code [unknown]; how the submit (0x4dfa00 / 0x4dfa80)
+    // applies the record is [ENC]: the SHADOW slot of the TD_Ground materials
+    // (runtime slot, TD_Ground handler 0x00d712c0) takes its texture [INF].
+    for ( uint32_t list = 0; list < 3; list++ ) {
+        EdenDrawParams &params = pSector->GroundInstanceParams[list];
+        params.bDeferBlended = true;
+        params.Vectors["sectrOff"] = Vector4f( pSector->Origin.x, 0.0f, pSector->Origin.z, 768.0f );
+        if ( list != 0 && pShadowMap != nullptr ) {
+            EdenDrawParams::TextureOverride entry;
+            entry.ShaderSetGUID = kGroundShaderSet;
+            entry.SlotType = kShadowSlotType;
+            entry.pTexture = pShadowMap;
+            entry.Sampler = kSamplerLinearMirror;
+            params.TextureOverrides.push_back( entry );
+        }
+    }
     loadInstances( *pSector, name );
+    loadEffects( *pSector, name );
     OTDU_LOG_DEBUG( "EdenWorld: %s at (%.0f, %.0f) objects (%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n", name.c_str(),
                     pSector->Origin.x, pSector->Origin.z, pSector->Objects.getBoundsMin().x,
                     pSector->Objects.getBoundsMin().y, pSector->Objects.getBoundsMin().z,
@@ -614,8 +933,63 @@ bool EdenWorld::loadArea( int32_t x, int32_t y ) {
     pArea->Terrain.Spacing = 24.0f;
     pArea->Objects.load( *pRenderer, pArea->AreaBank, ( std::string( name ) + "-o" ).c_str(), &libraryMaterials, path );
     pArea->Objects.bindUVAnimations( pArea->AreaBank );
+    if ( getenv( "OTDU_GROUND_LOG" ) != nullptr ) {
+        uint32_t numGround = 0;
+        for ( const EdenMaterial &material : pArea->Objects.getMaterials() ) {
+            if ( material.ShaderSetGUID == kGroundShaderSet || material.ShaderSetGUID == kGroundHMShaderSet ) {
+                OTDU_LOG_INFO( "EdenWorld: %s: TD_Ground material '%s'\n", name, material.Name.c_str() );
+                numGround++;
+            }
+        }
+        OTDU_LOG_INFO( "EdenWorld: %s: %u TD_Ground area object materials\n", name, numGround );
+    }
+    RegisterNeons( pArea->Objects, static_cast<uint32_t>( GetIdentifier64bit( name ) ), pArea->NeonMaterials,
+                   pArea->NeonBlinks );
+    // Sector cell groups of the area objects (FUN_00992890 [CODE]): for each
+    // of the 8 x 8 sectors the node "Sector-%d-%d-%d-%d" (x, y, sx, sy) is
+    // looked up in the area -o scene and stored in a per sector table
+    // (FUN_00992820); on odd rows the first cell also looks up the node of
+    // sector (x - 1, y, 7, sy), whose staggered cell overlaps this area by
+    // half a sector. [DATA] area-x-y-o.3dd: BLOCK -> SECTOR-x-y-sx-sy (dummy)
+    // -> OCEAN tile (the 768 m cell) and the far objects of that sector
+    // (e.g. casino area-0-0: CITY under SECTOR-0-0-3-1).
+    if ( pArea->Objects.isLoaded() ) {
+        const Render3DD &scene = pArea->Objects.getScene();
+        std::vector<std::pair<int32_t, SectorId>> groups;
+        for ( int32_t sy = 0; sy < static_cast<int32_t>( kSectorsPerArea ); sy++ ) {
+            for ( int32_t sx = 0; sx < static_cast<int32_t>( kSectorsPerArea ); sx++ ) {
+                if ( sx == 0 && ( sy & 1 ) != 0 ) {
+                    const SectorId previous = { x - 1, y, static_cast<int32_t>( kSectorsPerArea ) - 1, sy };
+                    const int32_t node = scene.findNode( SectorName( previous ).c_str() );
+                    if ( node >= 0 ) {
+                        groups.emplace_back( node, previous );
+                    }
+                }
+                const SectorId id = { x, y, sx, sy };
+                const int32_t node = scene.findNode( SectorName( id ).c_str() );
+                if ( node >= 0 ) {
+                    groups.emplace_back( node, id );
+                }
+            }
+        }
+        for ( const EdenModel::Item &item : pArea->Objects.getItems() ) {
+            SectorId sector = { INT32_MIN, 0, 0, 0 };
+            for ( const auto &group : groups ) {
+                if ( scene.isDescendantOf( item.NodeIndex, group.first ) ) {
+                    sector = group.second;
+                    break;
+                }
+            }
+            pArea->ItemSectors.push_back( sector );
+        }
+        if ( getenv( "OTDU_OCEAN_LOG" ) != nullptr ) {
+            OTDU_LOG_INFO( "EdenWorld: %s: %zu items, %zu sector groups\n", name, pArea->Objects.getItems().size(),
+                           groups.size() );
+        }
+    }
     areas.push_back( std::move( pArea ) );
     bIslandIndicesDirty = true;
+    bOceanVisibilityDirty = true;
     return true;
 }
 
@@ -771,6 +1145,7 @@ void EdenWorld::draw( EdenRenderer &renderer, const Vector3f &cameraPosition ) {
     static const bool bNoTerrain = CmdLine::HasArg( "-noterrain" );
     static const bool bNoObjects = CmdLine::HasArg( "-noobjects" );
     static const bool bNoInstances = CmdLine::HasArg( "-noinstances" );
+    static const bool bNoAreaObjects = CmdLine::HasArg( "-noareaobjects" );
     if ( bOceanVisibilityDirty ) {
         updateOceanVisibility();
     }
@@ -805,6 +1180,19 @@ void EdenWorld::draw( EdenRenderer &renderer, const Vector3f &cameraPosition ) {
             renderer.draw( mesh, area.Terrain.Materials[0], world );
         }
     }
+    // Area objects (area-local, -o: the 768 m ocean tiles of the sector cells
+    // and the far objects), per sector group (updateOceanVisibility). Without
+    // them the island AREA-x-y ocean tile (hidden under a loaded area) left a
+    // hole down to the island heightfield (-100 m off the coast [DATA]) or
+    // the sky dome ground colour: the "beige band" on the horizon.
+    for ( auto &pArea : areas ) {
+        if ( bNoObjects || bNoAreaObjects ) {
+            break;
+        }
+        if ( pArea->Objects.isLoaded() ) {
+            pArea->Objects.draw( renderer, Matrix4x4f::Translation( pArea->Origin ) );
+        }
+    }
     for ( auto &pSector : sectors ) {
         Sector &sector = *pSector;
         const Matrix4x4f world = Matrix4x4f::Translation( sector.Origin );
@@ -818,6 +1206,7 @@ void EdenWorld::draw( EdenRenderer &renderer, const Vector3f &cameraPosition ) {
             drawInstances( renderer, sector, cameraPosition );
         }
     }
+    flushImpostors( renderer );
 }
 
 bool EdenWorld::getSurfaceHeight( float x, float z, float maxHeight, float &outHeight ) const {
@@ -985,21 +1374,29 @@ void EdenWorld::updateOceanVisibility() {
             }
         }
     }
+    // Area objects: the items of a "Sector-x-y-sx-sy" group (its ocean tile
+    // and far objects) are hidden while that sector is loaded (finest level
+    // wins [INF: the per sector table of FUN_00992820 is filled in readable
+    // code, its use per frame is not]). Items outside any group fall back to
+    // the sector under their centre.
     for ( auto &pArea : areas ) {
         Area &area = *pArea;
         if ( !area.Objects.isLoaded() ) {
             continue;
         }
-        for ( const EdenModel::Item &item : area.Objects.getItems() ) {
-            if ( !IsOcean( area.Objects.getMaterials()[item.MaterialIndex] ) ) {
-                continue;
+        const std::vector<EdenModel::Item> &items = area.Objects.getItems();
+        for ( size_t i = 0; i < items.size(); i++ ) {
+            const EdenModel::Item &item = items[i];
+            SectorId sector = i < area.ItemSectors.size() ? area.ItemSectors[i] : SectorId{ INT32_MIN, 0, 0, 0 };
+            if ( sector.AreaX == INT32_MIN ) {
+                const Vector3f center = area.Objects.getNodeTransform( item.NodeIndex )
+                                            .transformPoint( ( item.BoundsMin + item.BoundsMax ) * 0.5f );
+                sector = getSectorAt( area.Origin + center );
             }
-            const Vector3f center = area.Objects.getNodeTransform( item.NodeIndex )
-                                        .transformPoint( ( item.BoundsMin + item.BoundsMax ) * 0.5f );
-            const Vector3f world = area.Origin + center;
-            const bool bSectorLoaded = isSectorLoaded( getSectorAt( world ) );
-            areaHidden += bSectorLoaded ? 1 : 0;
-            area.Objects.setNodeVisible( item.NodeIndex, bOceanVisible && !bSectorLoaded );
+            const bool bSectorLoaded = isSectorLoaded( sector );
+            const bool bOcean = IsOcean( area.Objects.getMaterials()[item.MaterialIndex] );
+            areaHidden += ( bOcean && bSectorLoaded ) ? 1 : 0;
+            area.Objects.setNodeVisible( item.NodeIndex, !bSectorLoaded && ( bOceanVisible || !bOcean ) );
         }
     }
     for ( auto &pSector : sectors ) {
@@ -1010,6 +1407,35 @@ void EdenWorld::updateOceanVisibility() {
         for ( const EdenModel::Item &item : sector.Objects.getItems() ) {
             if ( IsOcean( sector.Objects.getMaterials()[item.MaterialIndex] ) ) {
                 sector.Objects.setNodeVisible( item.NodeIndex, bOceanVisible );
+            }
+        }
+    }
+    if ( getenv( "OTDU_OCEAN_DUMP" ) != nullptr && islandOcean.isLoaded() ) {
+        const std::vector<SceneNode> &nodes = islandOcean.getScene().getNodes();
+        for ( size_t i = 0; i < nodes.size(); i++ ) {
+            OTDU_LOG_INFO( "ocean node %zu '%s' parent %d obj %016llx\n", i, nodes[i].Name.c_str(), nodes[i].Parent,
+                           static_cast<unsigned long long>( nodes[i].ObjectHashcode ) );
+        }
+        for ( const EdenModel::Item &item : islandOcean.getItems() ) {
+            const Vector3f a = islandOcean.getNodeTransform( item.NodeIndex ).transformPoint( item.BoundsMin );
+            const Vector3f b = islandOcean.getNodeTransform( item.NodeIndex ).transformPoint( item.BoundsMax );
+            OTDU_LOG_INFO( "ocean item node %d (%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n", item.NodeIndex, a.x, a.y, a.z, b.x,
+                           b.y, b.z );
+        }
+        for ( auto &pArea : areas ) {
+            const std::vector<SceneNode> &areaNodes = pArea->Objects.getScene().getNodes();
+            for ( size_t i = 0; i < areaNodes.size(); i++ ) {
+                OTDU_LOG_INFO( "area %d-%d node %zu '%s' parent %d obj %016llx\n", pArea->X, pArea->Y, i,
+                               areaNodes[i].Name.c_str(), areaNodes[i].Parent,
+                               static_cast<unsigned long long>( areaNodes[i].ObjectHashcode ) );
+            }
+            for ( const EdenModel::Item &item : pArea->Objects.getItems() ) {
+                const Vector3f a = pArea->Objects.getNodeTransform( item.NodeIndex ).transformPoint( item.BoundsMin );
+                const Vector3f b = pArea->Objects.getNodeTransform( item.NodeIndex ).transformPoint( item.BoundsMax );
+                const EdenMaterial &material = pArea->Objects.getMaterials()[item.MaterialIndex];
+                OTDU_LOG_INFO( "area %d-%d item node %d mat '%s' %016llx (%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n", pArea->X,
+                               pArea->Y, item.NodeIndex, material.Name.c_str(),
+                               static_cast<unsigned long long>( material.ShaderSetGUID ), a.x, a.y, a.z, b.x, b.y, b.z );
             }
         }
     }
@@ -1040,6 +1466,168 @@ void EdenWorld::forEachOceanMaterial(
     for ( EdenMaterial &material : islandOcean.getMaterials() ) {
         if ( IsOcean( material ) ) {
             callback( material, 2, pIslandColorMap );
+            // AREASIZE (kind 2 only) = the worldconfig.cpr area grid as floats
+            // (levelObj+0xf98/+0xf9c, FUN_008be1e0 / FUN_0098e060 [CODE]):
+            // vs_2 colour UV = v0.xz / (6144 AreaSize) [SHADER].
+            material.StageConstants[0]["AreaSize"] = {
+                Vector4f( static_cast<float>( areaColumns ), static_cast<float>( areaRows ), 0.0f, 0.0f ) };
         }
     }
+}
+
+void EdenWorld::loadEffectsBank( const char *pIsland ) {
+    // FUN_00c39050: the Particles service ("Particles", vtable 0x00ef6fd0)
+    // loads the island bank "vfx_env" of the "FX" folder into its bank object
+    // (mgr+0xd6c0) [CODE].
+    const std::string path = "Euro/Bnk/islands/" + std::string( pIsland ) + "/fx/vfx_env.bnk";
+    if ( !gpFile->fileExists( path.c_str() ) || !fxBank.load( path.c_str() ) ) {
+        OTDU_LOG_WARN( "EdenWorld: '%s' not found (no ambient effects)\n", path.c_str() );
+        return;
+    }
+    gpRender->getTextureCache().loadBankTextures( fxBank, path.c_str() );
+    fxHashcodes.load( fxBank );
+    const BankEntry *pEntities = fxBank.findEntry( "entities.xmb" );
+    if ( pEntities == nullptr || !fxEntities.load( pEntities->pData, pEntities->Size ) ) {
+        OTDU_LOG_WARN( "EdenWorld: '%s' has no entities.xmb\n", path.c_str() );
+        return;
+    }
+    // Fx__Root__World { __Hc; __Name; SourceData; TriggerDistance } (loader
+    // FUN_00b17930: base FUN_00b17820 -> +0x10 SourceData, TriggerDistance ->
+    // +0x20, default 1000.0 = DAT_00eddb38 [CODE]).
+    XmbValue world = fxEntities.getRoot()["ExportType_FxWorld"];
+    for ( uint32_t i = 0; i < world.getArraySize( "ArrayOf_Fx__Root__World" ); i++ ) {
+        XmbValue entry = world.getArrayElement( "ArrayOf_Fx__Root__World", i );
+        EffectSource &source = fxSources[entry["SourceData"].asUInt64()];
+        source.Name = entry["__Name"].asString();
+        source.TriggerDistance = entry["TriggerDistance"].asFloat( 1000.0f );
+        OTDU_LOG_DEBUG( "EdenWorld: ambient effect %s (source %016llx), trigger distance %.0f\n", source.Name.c_str(),
+                        static_cast<unsigned long long>( entry["SourceData"].asUInt64() ), source.TriggerDistance );
+    }
+    OTDU_LOG_INFO( "EdenWorld: %s: %zu ambient effects (Fx__Root__World)\n", path.c_str(), fxSources.size() );
+}
+
+void EdenWorld::loadEffects( Sector &sector, const std::string &name ) {
+    const BankEntry *pEntry = sector.SectorBank.findEntry( ( name + "-f" ).c_str(), "pmi" );
+    if ( pEntry == nullptr ) {
+        return;
+    }
+    // FUN_00c38d40: same record decoding as the other lists (FUN_00988250 +
+    // sector origin x / z), any MOB type, at most 30 (0x1e) records.
+    std::vector<PmiInstance> instances;
+    if ( !ParsePmi( pEntry->pData, pEntry->Size, sector.Origin, instances ) ) {
+        OTDU_LOG_WARN( "EdenWorld: failed to parse '%s'\n", pEntry->Filename.c_str() );
+        return;
+    }
+    for ( const PmiInstance &instance : instances ) {
+        if ( sector.Effects.size() >= 30 ) {
+            break;
+        }
+        Sector::Effect effect;
+        effect.SourceHash = instance.Hashcode;
+        effect.World = instance.World;
+        // +0x60 = TriggerDistance^2 of the Fx__Root__World whose SourceData
+        // is the record hash (FUN_00b34a40), 0 when there is none (never
+        // started) [CODE].
+        auto it = fxSources.find( instance.Hashcode );
+        effect.TriggerDistanceSq = it != fxSources.end() ? it->second.TriggerDistance * it->second.TriggerDistance : 0.0f;
+        OTDU_LOG_INFO( "EdenWorld: %s: effect %s (%016llx) at (%.1f, %.1f, %.1f)\n", name.c_str(),
+                       it != fxSources.end() ? it->second.Name.c_str() : "(unknown source)",
+                       static_cast<unsigned long long>( instance.Hashcode ), instance.Position.x, instance.Position.y,
+                       instance.Position.z );
+        sector.Effects.push_back( std::move( effect ) );
+    }
+}
+
+void EdenWorld::setEffectsEnabled( bool bEnable ) {
+    bEffectsEnabled = bEnable;
+    if ( !bEnable ) {
+        for ( auto &pSector : sectors ) {
+            for ( Sector::Effect &effect : pSector->Effects ) {
+                effect.Instances.clear();
+            }
+        }
+    }
+}
+
+void EdenWorld::updateEffects( const Vector3f &cameraPosition, float deltaTime ) {
+    if ( !bEffectsEnabled || pRenderer == nullptr ) {
+        return;
+    }
+    // FUN_00c38fb0 -> FUN_00c38b10 per loaded sector [CODE]: d^2 from the
+    // camera position (DAT_011958f0..f8) to the entry translation.
+    for ( auto &pSector : sectors ) {
+        for ( size_t i = 0; i < pSector->Effects.size(); i++ ) {
+            Sector::Effect &effect = pSector->Effects[i];
+            const Vector3f delta = effect.World.getTranslation() - cameraPosition;
+            const float distanceSq = delta.dot( delta );
+            if ( effect.TriggerDistanceSq < distanceSq ) {
+                if ( !effect.Instances.empty() ) {
+                    OTDU_LOG_DEBUG( "EdenWorld: effect %016llx stopped (%.0f m)\n",
+                                    static_cast<unsigned long long>( effect.SourceHash ), std::sqrt( distanceSq ) );
+                }
+                effect.Instances.clear();
+                continue;
+            }
+            if ( effect.Instances.empty() ) {
+                // FUN_00a9bb30: creates the fx of the source (edFx, [ENC]).
+                auto it = fxSources.find( effect.SourceHash );
+                if ( it == fxSources.end() ) {
+                    continue;
+                }
+                EffectSource &source = it->second;
+                if ( !source.bResolved ) {
+                    source.bResolved = true;
+                    source.Systems =
+                        fxLibrary.getSourceSystems( *pRenderer, fxBank, fxHashcodes, fxEntities, effect.SourceHash );
+                }
+                // The .bfx particle nodes of vfx_env have an identity
+                // transform [DATA]: world = entry matrix * .prt emitter.
+                for ( size_t s = 0; s < source.Systems.size(); s++ ) {
+                    auto pInstance = std::make_unique<EdenParticleInstance>();
+                    const uint32_t seed = static_cast<uint32_t>( effect.SourceHash ) ^
+                                          static_cast<uint32_t>( ( i + 1 ) * 0x9e3779b9u ) ^ static_cast<uint32_t>( s );
+                    pInstance->initialize( source.Systems[s], effect.World, seed );
+                    effect.Instances.push_back( std::move( pInstance ) );
+                }
+                const Vector3f p = effect.World.getTranslation();
+                OTDU_LOG_INFO( "EdenWorld: effect %s started at (%.1f, %.1f, %.1f), %.0f m from the camera, %zu "
+                               "emitters\n",
+                               source.Name.c_str(), p.x, p.y, p.z, std::sqrt( distanceSq ), effect.Instances.size() );
+            }
+            for ( auto &pInstance : effect.Instances ) {
+                pInstance->update( deltaTime );
+            }
+        }
+    }
+}
+
+void EdenWorld::drawEffects( EdenRenderer &renderer, const Vector3f &cameraPosition ) {
+    if ( !bEffectsEnabled ) {
+        return;
+    }
+    for ( auto &pSector : sectors ) {
+        for ( Sector::Effect &effect : pSector->Effects ) {
+            for ( auto &pInstance : effect.Instances ) {
+                pInstance->draw( renderer, cameraPosition );
+            }
+        }
+    }
+}
+
+uint32_t EdenWorld::getNumEffects() const {
+    uint32_t count = 0;
+    for ( const auto &pSector : sectors ) {
+        count += static_cast<uint32_t>( pSector->Effects.size() );
+    }
+    return count;
+}
+
+uint32_t EdenWorld::getNumRunningEffects() const {
+    uint32_t count = 0;
+    for ( const auto &pSector : sectors ) {
+        for ( const Sector::Effect &effect : pSector->Effects ) {
+            count += effect.Instances.empty() ? 0u : 1u;
+        }
+    }
+    return count;
 }

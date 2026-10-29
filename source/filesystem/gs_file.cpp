@@ -177,6 +177,8 @@ std::optional<std::filesystem::path> GSFile::resolvePath( const char *pPath ) {
     if ( resolved.has_value() ) {
         std::lock_guard<std::mutex> lock( cacheMutex );
         resolvedPathCache[key] = *resolved;
+    } else {
+        OTDU_LOG_DEBUG( "Path not resolved: '%s'\n", pPath );
     }
     return resolved;
 }

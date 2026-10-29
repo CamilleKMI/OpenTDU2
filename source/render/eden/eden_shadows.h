@@ -45,10 +45,11 @@ public:
 
     // Slices + caster maps for the camera of 'scene' (outside render passes).
     void renderCasters( EdenRenderer &renderer, const EdenSceneParams &scene, const DrawCasters &drawCasters );
-    // Screen shadow buffer (R: sun visibility) from gViewPos (outside render
-    // passes). Returns the buffer to bind to s15.
+    // Screen shadow buffer (R: sun visibility, G / B: encoded headlight
+    // light of pHeadLights = HeadLightsRT, HEADLIGHTS BLIT) from gViewPos
+    // (outside render passes). Returns the buffer to bind to s15.
     GPUTexture *resolve( EdenRenderer &renderer, const EdenSceneParams &scene, GPUTexture *pViewPos,
-                         const WeatherPreset *pWeather );
+                         const WeatherPreset *pWeather, GPUTexture *pHeadLights = nullptr );
     // Shadow_* scene constants (Shadow_SlicesDist...).
     void setupSceneConstants( EdenSceneParams &scene, const WeatherPreset *pWeather ) const;
 

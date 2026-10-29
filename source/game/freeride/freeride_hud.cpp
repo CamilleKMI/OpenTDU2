@@ -205,6 +205,66 @@ void FreeRideHud::closeGoal() {
     goalTimer = -1.0f;
 }
 
+void FreeRideHud::setTestDrive( bool bEnable ) {
+    if ( !hud.isLoaded() ) {
+        return;
+    }
+    hud.setVariableBool( "/:IsTest", bEnable );
+    hud.setClipVisible( "/HUD/time_cd", bEnable );
+    if ( bEnable ) {
+        hud.gotoLabel( "/HUD/time_cd", "open", true );
+    }
+}
+
+void FreeRideHud::openAccessoryMenu( bool bHasHood, bool bHasWindows, bool bHasTurnSignals ) {
+    if ( !hud.isLoaded() ) {
+        return;
+    }
+    // FUN_00928840 [CODE]: /:HasHood = car vfunc +0x34 (FUN_00c66250),
+    // /:HasWindows = FUN_009287b0, /:HasTurnSignals = FUN_00928720. /:IsBike
+    // (SetIcons picks the bike icon set when it is not false) = vehicle
+    // category 0x12 / 0x13 / 0x16 (e.g. 0x00a7676a) [CODE]: false for a car.
+    // Variant type 7 (int 0 / 1) for the Has* flags, 5 (bool) for IsBike.
+    hud.setVariableNumber( "/:HasHood", bHasHood ? 1.0 : 0.0 );
+    hud.setVariableNumber( "/:HasWindows", bHasWindows ? 1.0 : 0.0 );
+    hud.setVariableNumber( "/:HasTurnSignals", bHasTurnSignals ? 1.0 : 0.0 );
+    hud.setVariableBool( "/:IsBike", false );
+    // FUN_00928c10: "open" on HUD/ig_menu [CODE] (the HUD/radio vfunc +0x100
+    // (2.0) call next to it is not identified [INF: left out]).
+    hud.setClipVisible( "/HUD/ig_menu", true );
+    hud.gotoLabel( "/HUD/ig_menu", "open", true );
+}
+
+void FreeRideHud::validAccessory( const std::string &label ) {
+    if ( hud.isLoaded() ) {
+        // FUN_00928e70: HUD/ig_menu vfunc +0xe4 ("ValidIGM", label) [CODE].
+        hud.invoke( "/HUD/ig_menu", "ValidIGM", { label } );
+    }
+}
+
+void FreeRideHud::closeAccessoryMenu() {
+    if ( hud.isLoaded() ) {
+        hud.gotoLabel( "/HUD/ig_menu", "close", true );
+    }
+}
+
+void FreeRideHud::setCountdown( float remaining ) {
+    if ( !hud.isLoaded() ) {
+        return;
+    }
+    // FUN_00a11120: ms = (uint)ROUND(t * 1000.0 + 0.5); min = ms / 60000,
+    // sec = ms % 60000 / 1000, cent = ms % 1000 / 10 [CODE]. Digits "%02d"
+    // (binding width 2) [INF].
+    const uint32_t ms = static_cast<uint32_t>( std::lround( std::max( remaining, 0.0f ) * 1000.0 + 0.5 ) );
+    char text[16];
+    snprintf( text, sizeof( text ), "%02u", ms / 60000u );
+    hud.setVariable( "/:MinCd", text );
+    snprintf( text, sizeof( text ), "%02u", ( ms % 60000u ) / 1000u );
+    hud.setVariable( "/:SecCd", text );
+    snprintf( text, sizeof( text ), "%02u", ( ( ms % 60000u ) % 1000u ) / 10u );
+    hud.setVariable( "/:CentCd", text );
+}
+
 void FreeRideHud::tick( float deltaTime, const State &newState ) {
     state = newState;
     if ( goalTimer >= 0.0f ) {
@@ -254,7 +314,9 @@ void FreeRideHud::draw( Renderer2D &renderer, const VehicleWorldCollision *pColl
     if ( !gauges.isLoaded() ) {
         drawGauge( renderer );
     }
-    drawZone( renderer );
+    if ( bZoneShown ) {
+        drawZone( renderer );
+    }
     renderer.end();
     if ( gauges.isLoaded() ) {
         // Dial texture (FUN_009661b0 / FUN_00966070 draw callbacks), the
@@ -347,6 +409,30 @@ void FreeRideHud::drawMinimap( Renderer2D &renderer, const VehicleWorldCollision
                                              }
                                          } );
     }
+    if ( bTarget ) {
+        // Target marker, clamped on the map border [INF].
+        Vector2f m = toMap( Vector3f( targetX, 0.0f, targetZ ) );
+        const Vector2f d( m.x - center.x, m.y - center.y );
+        float scale = 1.0f;
+        const float margin = 8.0f;
+        if ( d.x > 0.0f && m.x > x1 - margin ) {
+            scale = Min( scale, ( x1 - margin - center.x ) / d.x );
+        }
+        if ( d.x < 0.0f && m.x < x0 + margin ) {
+            scale = Min( scale, ( x0 + margin - center.x ) / d.x );
+        }
+        if ( d.y > 0.0f && m.y > y1 - margin ) {
+            scale = Min( scale, ( y1 - margin - center.y ) / d.y );
+        }
+        if ( d.y < 0.0f && m.y < y0 + margin ) {
+            scale = Min( scale, ( y0 + margin - center.y ) / d.y );
+        }
+        m = Vector2f( center.x + d.x * scale, center.y + d.y * scale );
+        PushQuad( vertices, { m.x, m.y - 7.0f }, { m.x + 7.0f, m.y }, { m.x, m.y + 7.0f }, { m.x - 7.0f, m.y },
+                  Rgba( 40, 40, 40, 255 ) );
+        PushQuad( vertices, { m.x, m.y - 5.0f }, { m.x + 5.0f, m.y }, { m.x, m.y + 5.0f }, { m.x - 5.0f, m.y },
+                  Rgba( 255, 200, 0, 255 ) );
+    }
     // Player arrow.
     PushTriangle( vertices, center.x, center.y - 9.0f, center.x - 6.0f, center.y + 6.0f, center.x + 6.0f, center.y + 6.0f,
                   Rgba( 40, 40, 40, 255 ) );
@@ -354,6 +440,13 @@ void FreeRideHud::drawMinimap( Renderer2D &renderer, const VehicleWorldCollision
                   Rgba( 255, 255, 255, 255 ) );
     renderer.drawTriangles( nullptr, vertices.data(), static_cast<uint32_t>( vertices.size() ) );
     renderer.drawRectOutline( Rect2D( x0, y0, kMapSize, kMapSize ), 2.0f, Rgba( 230, 230, 230, 255 ) );
+    if ( bTarget ) {
+        const float dx = targetX - state.CarX, dz = targetZ - state.CarZ;
+        char distance[32];
+        snprintf( distance, sizeof( distance ), "%.1f km", std::sqrt( dx * dx + dz * dz ) / 1000.0f );
+        renderer.drawText( gpFlash->getTitleFont(), distance, x0 + 0.5f * kMapSize, y1 + 4.0f, 16.0f,
+                           Rgba( 255, 255, 255 ), eTextAlign::TA_Center );
+    }
 }
 
 void FreeRideHud::drawZone( Renderer2D &renderer ) {
